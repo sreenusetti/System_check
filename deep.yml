@@ -1,97 +1,104 @@
 ---
+# Configure fact caching in ansible.cfg:
+# [defaults]
+# gathering = smart
+# fact_caching = memory
+# fact_caching_timeout = 120
+
 - name: Health Check for Linux and Windows Nodes
   hosts: all
   gather_facts: true
 
   tasks:
     - name: Set OS family fact
-      ansible.builtin.set_fact:
+      set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
+      cacheable: yes  # Persist facts for cross-play access
 
     # --- Linux ---
     - name: Run check.sh on Linux
       when: os_family == "RedHat"
-      ansible.builtin.script: scripts/check.sh
+      script: scripts/check.sh
       register: linux_script_out
       changed_when: false
-      failed_when: linux_script_out.rc != 0
 
     # --- Windows ---
     - name: Run check.ps1 on Windows
       when: os_family == "Windows"
       block:
         - name: Ensure Windows temp directory exists
-          ansible.windows.win_file:
+          win_file:
             path: C:\Temp
             state: directory
 
         - name: Copy check.ps1 to Windows node
-          ansible.windows.win_copy:
+          win_copy:
             src: scripts/check.ps1
             dest: C:\Temp\check.ps1
 
         - name: Execute check.ps1
-          ansible.windows.win_shell: C:\Temp\check.ps1
+          win_shell: C:\Temp\check.ps1
           register: win_script_out
           changed_when: false
-          failed_when: win_script_out.rc != 0
 
     # --- Parse Output ---
     - name: Parse script output and determine status
-      ansible.builtin.set_fact:
+      set_fact:
         cpu: "{{ cpu_val }}"
         ram: "{{ ram_val }}"
         disk: "{{ disk_val }}"
-        status: "{{ 'CRITICAL' if (cpu_val | float > 60 or ram_val | float > 60 or disk_val | float > 60) else 'GOOD' }}"
+        status: "{{ 'CRITICAL' if cpu_val | float > 60 or ram_val | float > 60 or disk_val | float > 60 else 'GOOD' }}"
       vars:
-        script_output: "{{ linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout if os_family == 'Windows' else '' }}"
-        cpu_val: "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | default('0')) if script_output else '0' }}"
-        ram_val: "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default('0')) if script_output else '0' }}"
-        disk_val: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default('0')) if script_output else '0' }}"
+        script_output: "{{ (linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout) | default('') }}"
+        cpu_val: "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first) | default(0) }}"
+        ram_val: "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first) | default(0) }}"
+        disk_val: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first) | default(0) }}"
+      delegate_to: localhost  # Critical for cross-play access
+      cacheable: yes
 
 # ----------------------------------------------------------------------
 - name: Save Health Summary on AWX Control Node
   hosts: localhost
-  connection: local
   gather_facts: true
   vars:
-    log_dir: /tmp/health_check_logs
-    log_file: "{{ log_dir }}/{{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}.log"
+    log_file: "/tmp/health_summary.log"  # Simplified static filename
 
   tasks:
-    - name: Ensure log directory exists on control node
-      ansible.builtin.file:
-        path: "{{ log_dir }}"
-        state: directory
-        mode: '0755'
-
     - name: Build health summary content
-      ansible.builtin.set_fact:
+      set_fact:
         summary_output: |
           ####################################################################
           #                    Node Health Check Report                      #
           ####################################################################
-          {% for host in hostvars if hostvars[host].cpu is defined %}
-          Hostname: {{ '%-20s' | format(hostvars[host].inventory_hostname) }}
-          OS:       {{ hostvars[host].os_family | default('N/A') }}
-          CPU:      {{ hostvars[host].cpu | float | round(2) }}%
-          RAM:      {{ hostvars[host].ram | float | round(2) }}%
-          DISK:     {{ hostvars[host].disk | float | round(2) }}%
-          STATUS:   {{ hostvars[host].status | default('SUCCESS') }}
+          {% for host in play_hosts %}
+          {%   set hostvars = hostvars[host] %}
+          HOST:   {{ '%-20s' | format(host) }}
+          OS:     {{ hostvars.os_family | default('N/A') }}
+          CPU:    {{ hostvars.cpu | default('N/A') }}%
+          RAM:    {{ hostvars.ram | default('N/A') }}%
+          DISK:   {{ hostvars.disk | default('N/A') }}%
+          STATUS: {{ hostvars.status | default('FAILED_TO_GATHER') }}
           --------------------------------------------------------------------
           {% endfor %}
-          Job ID:   {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
-          Time:     {{ ansible_date_time.iso8601 }}
+          Time: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
           Executed by: {{ ansible_user_id }}
-          Log File: {{ log_file }}
           ####################################################################
 
-    - name: Write health summary to log file on control node
-      ansible.builtin.copy:
+    - name: Ensure /tmp directory exists
+      file:
+        path: /tmp
+        state: directory
+        mode: '1777'
+
+    - name: Write health summary to log file
+      copy:
         content: "{{ summary_output }}"
         dest: "{{ log_file }}"
-        mode: '0644'
 
-    - name: Print health summary in job output
-      ansible.builtin.debug:
-        msg: "{{ summary_output.split('\n') }}"
+    - name: Display log path
+      debug:
+        msg: "Health summary saved to {{ log_file }}"
+
+    - name: Print health summary
+      debug:
+        msg: "{{ summary_output }}"
