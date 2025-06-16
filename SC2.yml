@@ -81,7 +81,7 @@
           ####################################################################
           
           {% for host in ansible_play_hosts_all %}
-          HOST: {{ hostvars[host].inventory_hostname |-15s }} | OS: {{ hostvars[host].os_family | default('N/A') |-10s }} | CPU: {{ hostvars[host].cpu | float | round(2) ~'%' |-8s }} | RAM: {{ hostvars[host].ram | float | round(2) ~'%' |-8s }} | Disk: {{ hostvars[host].disk | float | round(2) ~'%' |-8s }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
+          HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
           {% endfor %}
 
           ####################################################################
