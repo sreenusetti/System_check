@@ -9,19 +9,14 @@
         os_family: "{{ ansible_facts['os_family'] }}"
 
     # ================================
-    # Linux Section - check.sh
+    # Script Execution (No changes here)
     # ================================
     - name: Run check.sh on Linux
       when: os_family == "RedHat"
-      # The 'script' module is efficient: it copies the script to a temp location,
-      # executes it, and then cleans up automatically.
       script: scripts/check.sh
       register: linux_script_out
       changed_when: false
 
-    # ================================
-    # Windows Section - check.ps1
-    # ================================
     - name: Run check.ps1 on Windows
       when: os_family == "Windows"
       block:
@@ -29,52 +24,48 @@
           win_file:
             path: C:\Temp
             state: directory
-
         - name: Copy check.ps1 to Windows node
           win_copy:
             src: scripts/check.ps1
             dest: C:\Temp\check.ps1
-
         - name: Execute check.ps1 on Windows
           win_shell: C:\Temp\check.ps1
           register: win_script_out
           changed_when: false
 
-    # ================================
-    # Parse Output and Set Health Status
-    # ================================
-    - name: Parse script output and set resource facts
+    # ==========================================================
+    # DEFINITIVE FIX: Parse and Determine Status in a Single Task
+    # ==========================================================
+    - name: Parse output, set facts, and determine status atomically
       set_fact:
-        # NOTE: This method depends on your scripts always producing output in the
-        # exact format: CPU=value RAM=value DISK=value
-        cpu: "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first) }}"
-        ram: "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first) }}"
-        disk: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first) }}"
+        # 1. Set the final facts for the report
+        cpu: "{{ cpu_val }}"
+        ram: "{{ ram_val }}"
+        disk: "{{ disk_val }}"
+        # 3. Determine status using the numeric local variables
+        status: "{{ 'CRITICAL' if cpu_val | float > 60 or ram_val | float > 60 or disk_val | float > 60 else 'GOOD' }}"
       vars:
-        # This variable cleanly selects the correct output based on OS
+        # This block defines local variables available ONLY inside this task
         script_output: "{{ linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout }}"
+        # 2. Extract values into temporary local variables
+        cpu_val: "{{ script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
+        ram_val: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
+        disk_val: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
 
-    # FIX 1: TYPE ERROR
-    - name: Determine health status
-      set_fact:
-        # Re-apply the |float filter at the moment of comparison for reliability.
-        status: "{{ 'CRITICAL' if cpu | float > 60 or ram | float > 60 or disk | float > 60 else 'GOOD' }}"
-
-    # ================================
-    # Summary Reporting
-    # ================================
+    # ====================================================
+    # Summary Reporting (With Correction for Log Path)
+    # ====================================================
     - name: Generate report and save to log file
-      run_once: true          # This entire block runs only once
-      delegate_to: localhost  # All tasks inside run on the control node (AWX container)
+      run_once: true
+      delegate_to: localhost
       block:
         - name: Generate timestamp for Job ID
           set_fact:
             job_log_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
 
-        # FIX 2: LOG FILE PERMISSIONS
+        # IMPORTANT: Fix for the logging issue
         - name: Create log directory in /tmp on control node
-          # We write to /tmp because the AWX user has permission there.
-          # /var/log is protected and will cause a "Permission denied" error.
+          # You MUST write to /tmp. The AWX user does not have permission for /var/log.
           file:
             path: "/tmp/ansible_health_logs"
             state: directory
