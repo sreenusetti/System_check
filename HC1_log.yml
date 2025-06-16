@@ -48,7 +48,7 @@
   hosts: localhost
   gather_facts: true
   vars:
-    log_dir: /var/lib/awx/health_logs
+    log_dir: /tmp/health_logs
     log_filename: "health_check_{{ ansible_date_time.date }}_{{ ansible_date_time.time | replace(':','') }}.log"
   tasks:
     - name: Build final health summary
