@@ -90,11 +90,12 @@
       debug:
         msg: "{{ summary_output }}"
       run_once: true
-      delegate_to: localhost
 
-    - name: Save summary report to control node log file
-      copy:
-        content: "{{ summary_output }}"
-        dest: "/tmp/health_check_{{ job_log_id }}.log"
+      
+      - name: Save summary report to file on AWX host (via temp file method)
       run_once: true
       delegate_to: localhost
+      local_action:
+        module: copy
+        content: "{{ summary_output }}"
+        dest: "/var/lib/awx/projects/logs/health_check_{{ job_log_id }}.log"
