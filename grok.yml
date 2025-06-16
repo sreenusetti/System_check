@@ -54,10 +54,35 @@
         disk: "{{ disk_val }}"
         status: "{{ 'CRITICAL' if (cpu_val | float > 60 or ram_val | float > 60 or disk_val | float > 60) else 'GOOD' }}"
       vars:
-        script_output: "{{ linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout if os_family == 'Windows' else '' }}"
-        cpu_val: "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | default('0')) if script_output else '0' }}"
-        ram_val: "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default('0')) if script_output else '0' }}"
-        disk_val: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default('0')) if script_output else '0' }}"
+        script_output: >-
+          {{
+            linux_script_out.stdout
+            if os_family == 'RedHat'
+            else win_script_out.stdout
+            if os_family == 'Windows'
+            else ''
+          }}
+        cpu_val: >-
+          {{
+            (script_output
+             | regex_search('CPU=(\\d+\\.?\\d*)', '\\1')
+             | first
+             | default('0'))
+          }}
+        ram_val: >-
+          {{
+            (script_output
+             | regex_search('RAM=(\\d+\\.?\\d*)', '\\1')
+             | first
+             | default('0'))
+          }}
+        disk_val: >-
+          {{
+            (script_output
+             | regex_search('DISK=(\\d+\\.?\\d*)', '\\1')
+             | first
+             | default('0'))
+          }}
 
 # ----------------------------------------------------------------------
 - name: Save Health Summary on Windows Node 10.206.2.30
@@ -81,7 +106,6 @@
         path: "{{ log_dir }}"
         state: directory
       register: dir_creation
-      failed_when: dir_creation.state != 'directory'
 
     - name: Verify log directory exists
       ansible.windows.win_stat:
