@@ -49,17 +49,17 @@
               register: win_disk
               changed_when: false
 
-        # CORRECTED: Task 1 - Create the unified variables first
+        # Task 1 - Create the unified variables
         - name: Unify resource values
           set_fact:
-            cpu: "{{ (os_family == 'RedHat') | ternary(linux_cpu.stdout, win_cpu.stdout) | float | round(2) }}"
-            ram: "{{ (os_family == 'RedHat') | ternary(linux_mem.stdout, win_mem.stdout) | float | round(2) }}"
-            disk: "{{ (os_family == 'RedHat') | ternary(linux_disk.stdout, win_disk.stdout) | float | round(2) }}"
+            cpu: "{{ (os_family == 'RedHat') | ternary(linux_cpu.stdout, win_cpu.stdout) }}"
+            ram: "{{ (os_family == 'RedHat') | ternary(linux_mem.stdout, win_mem.stdout) }}"
+            disk: "{{ (os_family == 'RedHat') | ternary(linux_disk.stdout, win_disk.stdout) }}"
 
-        # CORRECTED: Task 2 - Now use the new variables to set the status
+        # Task 2 - Use the variables, casting them to numbers at the moment of comparison
         - name: Determine health status from unified values
           set_fact:
-            status: "{{ 'CRITICAL' if cpu > 60 or ram > 60 or disk > 60 else 'GOOD' }}"
+            status: "{{ 'CRITICAL' if cpu | float > 60 or ram | float > 60 or disk | float > 60 else 'GOOD' }}"
       # End of the per-host block
 
 # ================================
@@ -81,7 +81,7 @@
           ####################################################################
           
           {% for host in ansible_play_hosts_all %}
-          HOST: {{ hostvars[host].inventory_hostname |-15s }} | OS: {{ hostvars[host].os_family | default('N/A') |-10s }} | CPU: {{ hostvars[host].cpu | default('N/A')~'%' |-8s }} | RAM: {{ hostvars[host].ram | default('N/A')~'%' |-8s }} | Disk: {{ hostvars[host].disk | default('N/A')~'%' |-8s }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
+          HOST: {{ hostvars[host].inventory_hostname |-15s }} | OS: {{ hostvars[host].os_family | default('N/A') |-10s }} | CPU: {{ hostvars[host].cpu | float | round(2) ~'%' |-8s }} | RAM: {{ hostvars[host].ram | float | round(2) ~'%' |-8s }} | Disk: {{ hostvars[host].disk | float | round(2) ~'%' |-8s }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
           {% endfor %}
 
           ####################################################################
