@@ -1,0 +1,83 @@
+---
+- name: Health Check for Linux and Windows Nodes
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    # =========================
+    # Task Block for each host
+    # =========================
+    - name: Per-host resource collection and fact setting
+      block:
+        - name: Set OS family fact
+          set_fact:
+            os_family: "{{ ansible_facts['os_family'] }}"
+
+        # --- Linux Collection ---
+        - when: os_family == "RedHat"
+          block:
+            - name: Get CPU usage (Linux)
+              shell: top -bn1 | grep "Cpu(s)" | awk '{print 100 - $8}'
+              register: linux_cpu
+              changed_when: false
+            - name: Get Memory usage (Linux)
+              shell: free | awk '/Mem:/ {print ($3/$2) * 100}'
+              register: linux_mem
+              changed_when: false
+            - name: Get Disk usage (Linux)
+              shell: df / | awk 'NR==2 {print $5}' | sed 's/%//'
+              register: linux_disk
+              changed_when: false
+
+        # --- Windows Collection ---
+        - when: os_family == "Windows"
+          block:
+            - name: Get CPU usage (Windows)
+              win_shell: '[math]::Round((Get-Counter "\Processor(_Total)\% Processor Time").CounterSamples.CookedValue, 2)'
+              register: win_cpu
+              changed_when: false
+            - name: Get Memory usage (Windows)
+              win_shell: |
+                $mem = Get-CimInstance Win32_OperatingSystem
+                [math]::Round((($mem.TotalVisibleMemorySize - $mem.FreePhysicalMemory) / $mem.TotalVisibleMemorySize) * 100, 2)
+              register: win_mem
+              changed_when: false
+            - name: Get Disk usage (Windows)
+              win_shell: |
+                $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+                [math]::Round((($disk.Size - $disk.FreeSpace) / $disk.Size) * 100, 2)
+              register: win_disk
+              changed_when: false
+
+        - name: Unify resource values and determine status
+          set_fact:
+            cpu: "{{ (os_family == 'RedHat') | ternary(linux_cpu.stdout, win_cpu.stdout) | float | round(2) }}"
+            ram: "{{ (os_family == 'RedHat') | ternary(linux_mem.stdout, win_mem.stdout) | float | round(2) }}"
+            disk: "{{ (os_family == 'RedHat') | ternary(linux_disk.stdout, win_disk.stdout) | float | round(2) }}"
+            status: "{{ 'CRITICAL' if cpu > 60 or ram > 60 or disk > 60 else 'GOOD' }}"
+      # End of the per-host block
+
+# ================================
+# Final Reporting Play (runs only ONCE)
+# ================================
+- name: Display Final Health Check Report
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  run_once: true
+
+  tasks:
+    - name: Print summary report to the job output
+      debug:
+        msg: |
+          
+          ####################################################################
+          #                 Node Health Check Summary Report                 #
+          ####################################################################
+          
+          {% for host in ansible_play_hosts_all %}
+          HOST: {{ hostvars[host].inventory_hostname |-15s }} | OS: {{ hostvars[host].os_family | default('N/A') |-10s }} | CPU: {{ hostvars[host].cpu | default('N/A')~'%' |-8s }} | RAM: {{ hostvars[host].ram | default('N/A')~'%' |-8s }} | Disk: {{ hostvars[host].disk | default('N/A')~'%' |-8s }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
+          {% endfor %}
+
+          ####################################################################
+          
