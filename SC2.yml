@@ -5,7 +5,7 @@
 
   tasks:
     # =========================
-    # Task Block for each host
+    # Per-host data collection
     # =========================
     - name: Per-host resource collection and fact setting
       block:
@@ -49,11 +49,16 @@
               register: win_disk
               changed_when: false
 
-        - name: Unify resource values and determine status
+        # CORRECTED: Task 1 - Create the unified variables first
+        - name: Unify resource values
           set_fact:
             cpu: "{{ (os_family == 'RedHat') | ternary(linux_cpu.stdout, win_cpu.stdout) | float | round(2) }}"
             ram: "{{ (os_family == 'RedHat') | ternary(linux_mem.stdout, win_mem.stdout) | float | round(2) }}"
             disk: "{{ (os_family == 'RedHat') | ternary(linux_disk.stdout, win_disk.stdout) | float | round(2) }}"
+
+        # CORRECTED: Task 2 - Now use the new variables to set the status
+        - name: Determine health status from unified values
+          set_fact:
             status: "{{ 'CRITICAL' if cpu > 60 or ram > 60 or disk > 60 else 'GOOD' }}"
       # End of the per-host block
 
@@ -80,4 +85,3 @@
           {% endfor %}
 
           ####################################################################
-          
