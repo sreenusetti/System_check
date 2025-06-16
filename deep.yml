@@ -1,4 +1,4 @@
- ---
+---
 - name: Health Check for Linux and Windows Nodes
   hosts: all
   gather_facts: true
