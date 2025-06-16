@@ -4,9 +4,19 @@
   gather_facts: true
 
   tasks:
+    - name: Debug first play execution
+      ansible.builtin.debug:
+        msg: "Starting health check for host {{ inventory_hostname }}"
+
     - name: Set OS family fact
       ansible.builtin.set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
+      register: set_fact_result
+      failed_when: set_fact_result.failed
+
+    - name: Debug OS family
+      ansible.builtin.debug:
+        msg: "OS family set to {{ os_family }} for host {{ inventory_hostname }}"
 
     # --- Linux ---
     - name: Run check.sh on Linux
@@ -55,21 +65,36 @@
   connection: local
   gather_facts: true
   vars:
-    log_dir: /var/tmp/health_check_logs
-    log_file: "{{ log_dir }}/{{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}.log"
+    log_dir: /root/health_check_logs
+    log_file: "{{ log_dir }}/health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
 
   tasks:
+    - name: Debug second play execution
+      ansible.builtin.debug:
+        msg: "Starting log file creation on localhost as user {{ ansible_user_id }}"
+
+    - name: Debug log file path
+      ansible.builtin.debug:
+        msg: "Log file will be created at: {{ log_file }}"
+
     - name: Ensure log directory exists on control node
       ansible.builtin.file:
         path: "{{ log_dir }}"
         state: directory
-        mode: '0755'
+        mode: '0700'
+        owner: root
       register: dir_creation
       failed_when: dir_creation.state != 'directory'
 
-    - name: Debug log directory creation
+    - name: Verify log directory exists
+      ansible.builtin.stat:
+        path: "{{ log_dir }}"
+      register: dir_stat
+      failed_when: not dir_stat.stat.exists or not dir_stat.stat.isdir
+
+    - name: Debug log directory existence
       ansible.builtin.debug:
-        msg: "Log directory {{ log_dir }} created: {{ dir_creation.state == 'directory' }}"
+        msg: "Log directory {{ log_dir }} exists: {{ dir_stat.stat.exists }} and is a directory: {{ dir_stat.stat.isdir }}"
 
     - name: Build health summary content
       ansible.builtin.set_fact:
@@ -96,21 +121,28 @@
       ansible.builtin.copy:
         content: "{{ summary_output }}"
         dest: "{{ log_file }}"
-        mode: '0644'
+        mode: '0600'
+        owner: root
       register: file_creation
       failed_when: file_creation.state != 'file'
 
-    - name: Debug log file creation
+    - name: Verify log file exists
+      ansible.builtin.stat:
+        path: "{{ log_file }}"
+      register: log_file_stat
+      failed_when: not log_file_stat.stat.exists or not log_file_stat.stat.isreg
+
+    - name: Debug log file existence
       ansible.builtin.debug:
-        msg: "Log file {{ log_file }} created: {{ file_creation.state == 'file' }}"
+        msg: "Log file {{ log_file }} exists: {{ log_file_stat.stat.exists }} and is a regular file: {{ log_file_stat.stat.isreg }}"
 
     - name: Set playbook status based on log file creation
       ansible.builtin.set_fact:
-        playbook_status: "{{ 'SUCCESS' if file_creation.state == 'file' else 'FAILED' }}"
+        playbook_status: "{{ 'SUCCESS' if log_file_stat.stat.exists and log_file_stat.stat.isreg else 'FAILED' }}"
 
     - name: Fail playbook if log file creation failed
       ansible.builtin.fail:
-        msg: "Playbook failed: Log file {{ log_file }} was not created successfully."
+        msg: "Playbook failed: Log file {{ log_file }} was not created successfully. Check permissions for {{ log_dir }} and ensure the user {{ ansible_user_id }} has write access."
       when: playbook_status == 'FAILED'
 
     - name: Print health summary in job output
