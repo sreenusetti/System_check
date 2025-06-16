@@ -14,7 +14,7 @@
     - name: Copy check.sh to Linux node
       when: os_family == "RedHat"
       copy:
-        src: ../scripts/check.sh
+        src: scripts/check.sh   # ✅ Now inside playbook dir
         dest: /usr/local/bin/check.sh
         mode: '0755'
 
@@ -30,7 +30,7 @@
     - name: Copy check.ps1 to Windows node
       when: os_family == "Windows"
       win_copy:
-        src: ../scripts/check.ps1
+        src: scripts/check.ps1   # ✅ Same here
         dest: C:\Scripts\check.ps1
 
     - name: Run check.ps1 on Windows
@@ -66,13 +66,10 @@
       delegate_to: localhost
       debug:
         msg: |
-          
           ####################################################################
           #                 Node Health Check Summary Report                 #
           ####################################################################
-          
           {% for host in ansible_play_hosts_all %}
           HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
           {% endfor %}
-
           ####################################################################
