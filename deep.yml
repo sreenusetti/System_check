@@ -13,7 +13,7 @@
     - name: Set OS family fact
       set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
-      cacheable: yes  # Persist facts for cross-play access
+      cacheable: yes  # Correct placement outside set_fact
 
     # --- Linux ---
     - name: Run check.sh on Linux
@@ -21,6 +21,7 @@
       script: scripts/check.sh
       register: linux_script_out
       changed_when: false
+      ignore_errors: yes  # Continue if script fails
 
     # --- Windows ---
     - name: Run check.ps1 on Windows
@@ -40,28 +41,33 @@
           win_shell: C:\Temp\check.ps1
           register: win_script_out
           changed_when: false
+      ignore_errors: yes  # Continue if script fails
 
     # --- Parse Output ---
     - name: Parse script output and determine status
       set_fact:
-        cpu: "{{ cpu_val }}"
-        ram: "{{ ram_val }}"
-        disk: "{{ disk_val }}"
-        status: "{{ 'CRITICAL' if cpu_val | float > 60 or ram_val | float > 60 or disk_val | float > 60 else 'GOOD' }}"
+        cpu: "{{ cpu_val | default('N/A') }}"
+        ram: "{{ ram_val | default('N/A') }}"
+        disk: "{{ disk_val | default('N/A') }}"
+        status: >-
+          {% if cpu_val is defined and ram_val is defined and disk_val is defined %}
+            {{ 'CRITICAL' if cpu_val|float > 60 or ram_val|float > 60 or disk_val|float > 60 else 'GOOD' }}
+          {% else %}
+            FAILED_TO_GATHER
+          {% endif %}
+      cacheable: yes  # Correct placement outside set_fact
       vars:
         script_output: "{{ (linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout) | default('') }}"
-        cpu_val: "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first) | default(0) }}"
-        ram_val: "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first) | default(0) }}"
-        disk_val: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first) | default(0) }}"
-      delegate_to: localhost  # Critical for cross-play access
-      cacheable: yes
+        cpu_val: "{{ script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first }}"
+        ram_val: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first }}"
+        disk_val: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first }}"
 
 # ----------------------------------------------------------------------
 - name: Save Health Summary on AWX Control Node
   hosts: localhost
   gather_facts: true
   vars:
-    log_file: "/tmp/health_summary.log"  # Simplified static filename
+    log_file: "/tmp/health_summary_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.log"
 
   tasks:
     - name: Build health summary content
@@ -70,14 +76,14 @@
           ####################################################################
           #                    Node Health Check Report                      #
           ####################################################################
-          {% for host in play_hosts %}
-          {%   set hostvars = hostvars[host] %}
+          {% for host in groups['all'] %}
+          {%   set vars = hostvars[host] %}
           HOST:   {{ '%-20s' | format(host) }}
-          OS:     {{ hostvars.os_family | default('N/A') }}
-          CPU:    {{ hostvars.cpu | default('N/A') }}%
-          RAM:    {{ hostvars.ram | default('N/A') }}%
-          DISK:   {{ hostvars.disk | default('N/A') }}%
-          STATUS: {{ hostvars.status | default('FAILED_TO_GATHER') }}
+          OS:     {{ vars.os_family | default('N/A') }}
+          CPU:    {{ vars.cpu | default('N/A') }}%
+          RAM:    {{ vars.ram | default('N/A') }}%
+          DISK:   {{ vars.disk | default('N/A') }}%
+          STATUS: {{ vars.status | default('FAILED_TO_GATHER') }}
           --------------------------------------------------------------------
           {% endfor %}
           Time: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
@@ -95,9 +101,15 @@
         content: "{{ summary_output }}"
         dest: "{{ log_file }}"
 
+    - name: Verify log file creation
+      stat:
+        path: "{{ log_file }}"
+      register: log_stat
+
     - name: Display log path
       debug:
         msg: "Health summary saved to {{ log_file }}"
+      when: log_stat.stat.exists
 
     - name: Print health summary
       debug:
