@@ -1,81 +1,135 @@
----
-- name: Health Check for Linux and Windows Nodes using Git-hosted Scripts
+- name: Unified Health Check and Report Generation
   hosts: all
   gather_facts: true
 
+  # Define the target host for saving the final report
+  vars:
+    reporting_host: "10.206.2.30"
+    log_dir: C:\Temp\health_reports
+    log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
+
   tasks:
-    - name: Set OS family fact
-      set_fact:
-        os_family: "{{ ansible_facts['os_family'] }}"
+    # ========================================================================
+    # BLOCK 1: Execute OS-Specific Health Check Scripts on each host
+    # This block runs on every host in the inventory.
+    # A rescue block catches any failures and sets a default status.
+    # ========================================================================
+    - name: Run OS-specific health check
+      block:
+        # --- Linux Section ---
+        - name: Run health check on Linux
+          when: ansible_facts['os_family'] in ['RedHat', 'Debian']
+          block:
+            - name: Copy check.sh to Linux node
+              ansible.builtin.copy:
+                src: scripts/check.sh
+                dest: /tmp/check.sh  # Using /tmp is safer for temporary scripts
+                mode: '0755'
 
-    # ================================
-    # Linux Section - check.sh
-    # ================================
-    - name: Copy check.sh to Linux node
-      when: os_family == "RedHat"
-      copy:
-        src: scripts/check.sh         # ✅ path relative to repo root
-        dest: /usr/local/bin/check.sh
-        mode: '0755'
+            - name: Execute check.sh on Linux
+              ansible.builtin.shell: /tmp/check.sh
+              register: script_out
+              changed_when: false
 
-    - name: Run check.sh on Linux
-      when: os_family == "RedHat"
-      shell: /usr/local/bin/check.sh
-      register: linux_script_out
-      changed_when: false
+        # --- Windows Section ---
+        - name: Run health check on Windows
+          when: ansible_facts['os_family'] == "Windows"
+          block:
+            - name: Ensure script directory exists on Windows
+              ansible.windows.win_file:
+                path: C:\Temp\ansible_scripts
+                state: directory
 
-    # ================================
-    # Windows Section - check.ps1
-    # ================================
-    - name: Ensure C:\Scripts exists on Windows
-      when: os_family == "Windows"
-      win_file:
-        path: C:\Scripts
-        state: directory
+            - name: Copy check.ps1 to Windows node
+              ansible.windows.win_copy:
+                src: scripts/check.ps1
+                dest: C:\Temp\ansible_scripts\check.ps1
 
-    - name: Copy check.ps1 to Windows node
-      when: os_family == "Windows"
-      win_copy:
-        src: scripts/check.ps1        # ✅ correct relative path
-        dest: C:\Scripts\check.ps1
+            - name: Execute check.ps1 on Windows
+              ansible.windows.win_shell: C:\Temp\ansible_scripts\check.ps1
+              register: script_out
+              changed_when: false
 
-    - name: Run check.ps1 on Windows
-      when: os_family == "Windows"
-      win_shell: C:\Scripts\check.ps1
-      register: win_script_out
-      changed_when: false
+        # --- Parse output from whichever script ran ---
+        - name: Parse script output and set health facts
+          ansible.builtin.set_fact:
+            cpu: "{{ (script_out.stdout | regex_search('CPU=([\\d.]+)', '\\1') | first | default(0) | float) }}"
+            ram: "{{ (script_out.stdout | regex_search('RAM=([\\d.]+)', '\\1') | first | default(0) | float) }}"
+            disk: "{{ (script_out.stdout | regex_search('DISK=([\\d.]+)', '\\1') | first | default(0) | float) }}"
+            status: "CHECK_COMPLETE"
+          when: script_out.stdout is defined
 
-    # ================================
-    # Parse Output and Set Health Status
-    # ================================
-    - name: Parse script output and set resource facts
-      set_fact:
-        cpu: "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | float) }}"
-        ram: "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | float) }}"
-        disk: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | float) }}"
-      vars:
-        script_output: >-
-          {{
-            linux_script_out.stdout if os_family == 'RedHat'
-            else win_script_out.stdout
-          }}
+      rescue:
+        - name: Set failure status if script execution failed
+          ansible.builtin.set_fact:
+            status: "CHECK_FAILED"
 
-    - name: Determine health status
-      set_fact:
-        status: "{{ 'CRITICAL' if (cpu | float) > 60 or (ram | float) > 60 or (disk | float) > 60 else 'GOOD' }}"
+    # ========================================================================
+    # BLOCK 2: Determine final health status based on parsed metrics
+    # This task also runs on every host that completed the check.
+    # ========================================================================
+    - name: Determine final health status from metrics
+      ansible.builtin.set_fact:
+        status: "{{ 'CRITICAL' if (cpu > 80 or ram > 80 or disk > 80) else 'GOOD' }}"
+      when: status == "CHECK_COMPLETE"
 
-    # ================================
-    # Final Summary Report
-    # ================================
+    # ========================================================================
+    # BLOCK 3: Print a quick summary to the console output
+    # This runs once on the controller for immediate feedback.
+    # ========================================================================
     - name: Print summary report to job output
       run_once: true
       delegate_to: localhost
-      debug:
+      ansible.builtin.debug:
         msg: |
           ####################################################################
           #                 Node Health Check Summary Report                 #
           ####################################################################
           {% for host in ansible_play_hosts_all %}
-          HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
+          {% set h = hostvars[host] %}
+          HOST: {{ '%-20s' | format(h.inventory_hostname) }} | OS: {{ '%-10s' | format(h.ansible_facts.os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((h.cpu | round(2) | string ~ '%') if h.cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((h.ram | round(2) | string ~ '%') if h.ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((h.disk | round(2) | string ~ '%') if h.disk is defined else 'N/A') }} | STATUS: {{ h.status | default('UNKNOWN') }}
           {% endfor %}
           ####################################################################
+
+    # ========================================================================
+    # BLOCK 4: Generate and save the detailed report on the target Windows node
+    # These tasks will ONLY run on the host specified in 'reporting_host'.
+    # ========================================================================
+    - name: Generate and save detailed report file
+      when: inventory_hostname == reporting_host
+      block:
+        - name: Ensure log directory exists on reporting node
+          ansible.windows.win_file:
+            path: "{{ log_dir }}"
+            state: directory
+
+        - name: Build health summary content from all hosts
+          ansible.builtin.set_fact:
+            summary_content: |
+              ####################################################################
+              #                    Node Health Check Report                      #
+              ####################################################################
+              {% for host in ansible_play_hosts_all %}
+              {% set h = hostvars[host] %}
+              Hostname: {{ '%-20s' | format(h.inventory_hostname) }}
+              OS:       {{ h.ansible_facts.os_family | default('N/A') }}
+              CPU:      {{ (h.cpu | round(2) | string + '%') if h.cpu is defined else 'N/A' }}
+              RAM:      {{ (h.ram | round(2) | string + '%') if h.ram is defined else 'N/A' }}
+              DISK:     {{ (h.disk | round(2) | string + '%') if h.disk is defined else 'N/A' }}
+              STATUS:   {{ h.status | default('CHECK_FAILED') }}
+              --------------------------------------------------------------------
+              {% endfor %}
+              Job ID:      {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
+              Time:        {{ ansible_date_time.iso8601 }}
+              Executed by: {{ ansible_user_id | default('N/A') }}
+              Log File:    {{ log_file }}
+              ####################################################################
+
+        - name: Write health summary to log file on {{ reporting_host }}
+          ansible.windows.win_copy:
+            content: "{{ summary_content }}"
+            dest: "{{ log_file }}"
+
+        - name: Display final report location
+          ansible.builtin.debug:
+            msg: "SUCCESS: Health check report saved to {{ log_file }} on host {{ inventory_hostname }}"
