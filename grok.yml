@@ -3,6 +3,12 @@
   hosts: all
   gather_facts: true
 
+  vars:
+    # Always define script_output as a string, even if empty
+    script_output: >-
+      {{ (linux_script_out.stdout if os_family == 'RedHat' else
+          win_script_out.stdout if os_family == 'Windows' else '') | default('') }}
+
   tasks:
     - name: Debug first play execution
       ansible.builtin.debug:
@@ -16,12 +22,13 @@
 
     - name: Debug OS family
       ansible.builtin.debug:
-        msg: "OS family set to {{ os_family }} for host {{ inventory_hostname }}"
+        msg: "OS family is {{ os_family }}"
 
     # --- Linux check ---
     - name: Run check.sh on Linux
       when: os_family == "RedHat"
-      ansible.builtin.script: scripts/check.sh
+      ansible.builtin.script:
+        cmd: scripts/check.sh
       register: linux_script_out
       changed_when: false
       failed_when: linux_script_out.rc != 0
@@ -46,38 +53,26 @@
           changed_when: false
           failed_when: win_script_out.rc != 0
 
-    # --- Parse Output & Determine Status ---
-    - name: Parse script output and determine status
+    # --- Parse script_output into usage variables ---
+    - name: Extract CPU, RAM, and DISK values
       ansible.builtin.set_fact:
         cpu: >
-          {{
-            (script_output
-             | regex_findall('CPU=(\\d+\\.?\\d*)')
-             | first
-             | default('0', true))
-          }}
+          {{ (script_output
+              | regex_findall('CPU=(\\d+\\.?\\d*)')
+              | first
+              | default('0', true)) }}
         ram: >
-          {{
-            (script_output
-             | regex_findall('RAM=(\\d+\\.?\\d*)')
-             | first
-             | default('0', true))
-          }}
+          {{ (script_output
+              | regex_findall('RAM=(\\d+\\.?\\d*)')
+              | first
+              | default('0', true)) }}
         disk: >
-          {{
-            (script_output
-             | regex_findall('DISK=(\\d+\\.?\\d*)')
-             | first
-             | default('0', true))
-          }}
-        status: >-
-          {{ 'CRITICAL'
-             if (cpu  | float > 60)
-             or (ram  | float > 60)
-             or (disk | float > 60)
-             else 'GOOD' }}
+          {{ (script_output
+              | regex_findall('DISK=(\\d+\\.?\\d*)')
+              | first
+              | default('0', true)) }}
       vars:
-        # Always define script_output as a string
+        # override script_output with actual registered variables
         script_output: >-
           {{ linux_script_out.stdout
              if os_family == 'RedHat'
@@ -85,11 +80,31 @@
              if os_family == 'Windows'
              else '' }}
 
+    - name: Debug extracted values
+      ansible.builtin.debug:
+        msg:
+          - "CPU usage = {{ cpu }}%"
+          - "RAM usage = {{ ram }}%"
+          - "DISK usage = {{ disk }}%"
+
+    - name: Determine overall status
+      ansible.builtin.set_fact:
+        status: >-
+          {{ 'CRITICAL'
+             if (cpu  | float > 60)
+             or (ram  | float > 60)
+             or (disk | float > 60)
+             else 'GOOD' }}
+
+    - name: Debug status
+      ansible.builtin.debug:
+        msg: "Overall status for {{ inventory_hostname }} is {{ status }}"
 
 # ----------------------------------------------------------------------
 - name: Save Health Summary on Windows Node 10.206.2.30
   hosts: 10.206.2.30
   gather_facts: true
+
   vars:
     log_dir:  C:\Temp\logfile
     log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
@@ -97,17 +112,16 @@
   tasks:
     - name: Debug second play execution
       ansible.builtin.debug:
-        msg: "Starting log file creation on {{ inventory_hostname }} as user {{ ansible_user_id }}"
+        msg: "Starting log file creation on {{ inventory_hostname }} as {{ ansible_user_id }}"
 
     - name: Debug log file path
       ansible.builtin.debug:
-        msg: "Log file will be created at: {{ log_file }}"
+        msg: "Will write report to {{ log_file }}"
 
-    - name: Ensure log directory exists on Windows node
+    - name: Ensure log directory exists
       ansible.windows.win_file:
         path: "{{ log_dir }}"
         state: directory
-      register: dir_creation
 
     - name: Verify log directory exists
       ansible.windows.win_stat:
@@ -117,7 +131,7 @@
 
     - name: Debug log directory existence
       ansible.builtin.debug:
-        msg: "Log directory {{ log_dir }} exists: {{ dir_stat.stat.exists }} and is a directory: {{ dir_stat.stat.isdir }}"
+        msg: "Directory {{ log_dir }} exists={{ dir_stat.stat.exists }}, isdir={{ dir_stat.stat.isdir }}"
 
     - name: Build health summary content
       ansible.builtin.set_fact:
@@ -140,7 +154,7 @@
           Log File:    {{ log_file }}
           ####################################################################
 
-    - name: Write health summary to log file on Windows node
+    - name: Write health summary to log file
       ansible.windows.win_copy:
         content: "{{ summary_output }}"
         dest:    "{{ log_file }}"
@@ -155,16 +169,12 @@
 
     - name: Debug log file existence
       ansible.builtin.debug:
-        msg: "Log file {{ log_file }} exists: {{ log_file_stat.stat.exists }} and is a regular file: {{ log_file_stat.stat.isfile }}"
+        msg: "Log file exists={{ log_file_stat.stat.exists }}, isfile={{ log_file_stat.stat.isfile }}"
 
-    - name: Set playbook status based on log file creation
-      ansible.builtin.set_fact:
-        playbook_status: "{{ 'SUCCESS' if log_file_stat.stat.exists and log_file_stat.stat.isfile else 'FAILED' }}"
-
-    - name: Fail playbook if log file creation failed
+    - name: Fail if log file creation failed
       ansible.builtin.fail:
-        msg: "Playbook failed: Log file {{ log_file }} was not created successfully on {{ inventory_hostname }}. Check permissions for {{ log_dir }}."
-      when: playbook_status == 'FAILED'
+        msg: "Log file {{ log_file }} was not created. Check permissions."
+      when: not (log_file_stat.stat.exists and log_file_stat.stat.isfile)
 
     - name: Print health summary in job output
       ansible.builtin.debug:
