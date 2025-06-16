@@ -1,97 +1,46 @@
----
-# NOTE: Fact caching settings in ansible.cfg do not share set_fact variables
-# between separate plays. A single play is required for this logic.
-
-- name: Health Check for Linux and Windows Nodes
-  hosts: all
-  gather_facts: true
+- name: Save Health Summary on AWX control node
+  hosts: health_summary
+  gather_facts: false
+  run_once: true
+  vars:
+    log_dir: "/var/tmp/health_check_logs"
+    log_file: "{{ log_dir }}/{{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}.log"
 
   tasks:
-    # ================================
-    # Data Collection Tasks
-    # ================================
-    - name: Set OS family fact
+    - name: Create directory for logs (safe path)
+      file:
+        path: "{{ log_dir }}"
+        state: directory
+        mode: '0775'
+
+    - name: Build summary from all hosts
       set_fact:
-        os_family: "{{ ansible_facts['os_family'] }}"
+        summary_output: |
+          ####################################################################
+          #                    Node Health Check Report                      #
+          ####################################################################
+          {% for host in groups['health_summary'] %}
+          Hostname: {{ '%-20s' | format(hostvars[host].hostname) }}
+          OS:       {{ hostvars[host].os }}
+          CPU:      {{ hostvars[host].cpu }}%
+          RAM:      {{ hostvars[host].ram }}%
+          DISK:     {{ hostvars[host].disk }}%
+          STATUS:   {{ hostvars[host].status }}
+          --------------------------------------------------------------------
+          {% endfor %}
+          Job ID:   {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
+          Time:     {{ ansible_date_time.iso8601 }}
+          Executed by: {{ ansible_user_id }}
+          Log File: {{ log_file }}
+          ####################################################################
 
-    # --- Linux ---
-    - name: Run check.sh on Linux
-      when: os_family == "RedHat"
-      script: scripts/check.sh
-      register: linux_script_out
-      changed_when: false
-      ignore_errors: yes
+    - name: Write log summary to control node path
+      copy:
+        content: "{{ summary_output }}"
+        dest: "{{ log_file }}"
+        mode: '0644'
+      delegate_to: localhost
 
-    # --- Windows ---
-    - name: Run check.ps1 on Windows
-      when: os_family == "Windows"
-      block:
-        - win_file:
-            path: C:\Temp
-            state: directory
-        - win_copy:
-            src: scripts/check.ps1
-            dest: C:\Temp\check.ps1
-        - win_shell: C:\Temp\check.ps1
-          register: win_script_out
-          changed_when: false
-      ignore_errors: yes
-
-    # --- Parse Output and Set Facts ---
-    - name: Parse script output and determine health status
-      set_fact:
-        # These facts will be available to the final reporting tasks
-        cpu: "{{ cpu_val }}"
-        ram: "{{ ram_val }}"
-        disk: "{{ disk_val }}"
-        status: >-
-          {% if cpu_val is defined and ram_val is defined and disk_val is defined %}
-            {{ 'CRITICAL' if cpu_val|float > 60 or ram_val|float > 60 or disk_val|float > 60 else 'GOOD' }}
-          {% else %}
-            FAILED_TO_GATHER
-          {% endif %}
-      vars:
-        # These 'vars' are temporary and local to this task only
-        script_output: "{{ (linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout) | default('') }}"
-        cpu_val: "{{ script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first }}"
-        ram_val: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first }}"
-        disk_val: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first }}"
-
-    # =================================================================
-    # Final Reporting Block (Runs ONCE at the end of the play)
-    # =================================================================
-    - name: Generate and display final health report
-      run_once: true          # Ensures this entire block runs only on the first host
-      delegate_to: localhost  # Executes the tasks on the AWX container, not the remote host
-      block:
-        - name: Build health summary content
-          set_fact:
-            summary_output: |
-              ####################################################################
-              #                    Node Health Check Report                      #
-              ####################################################################
-              {% for host in ansible_play_hosts_all %}
-              {%   set vars = hostvars[host] %}
-              HOST:   {{ '%-20s' | format(host) }}
-              OS:     {{ vars.os_family | default('N/A') }}
-              CPU:    {{ (vars.cpu ~ '%') if vars.cpu is defined and vars.cpu != None else 'N/A' }}
-              RAM:    {{ (vars.ram ~ '%') if vars.ram is defined and vars.ram != None else 'N/A' }}
-              DISK:   {{ (vars.disk ~ '%') if vars.disk is defined and vars.disk != None else 'N/A' }}
-              STATUS: {{ vars.status | default('FAILED_TO_GATHER') }}
-              --------------------------------------------------------------------
-              {% endfor %}
-
-        - name: Print health summary to the permanent AWX job log
-          debug:
-            msg: "{{ summary_output.split('\n') }}"
-
-        - name: (Optional) Save summary to a TEMPORARY log file for debugging
-          # NOTE: This file is created inside the ephemeral job container and will be DELETED after the run.
-          # The permanent record is the debug output above.
-          copy:
-            content: "{{ summary_output }}"
-            dest: "/tmp/health_summary_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.log"
-
-        - name: Display path of the temporary log file
-          debug:
-            msg: "A temporary health summary was saved inside the job container at /tmp/health_summary_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.log"
+    - name: Print log summary in job output
+      debug:
+        msg: "{{ summary_output.split('\n') }}"
