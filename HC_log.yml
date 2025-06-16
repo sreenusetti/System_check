@@ -1,22 +1,19 @@
 ---
-# PLAY 1: GATHER DATA FROM ALL TARGET NODES
-- name: Health Check - Data Collection
-  # Exclude the AWX control node itself from this part
-  hosts: all:!10.206.2.20
+# THIS PLAYBOOK USES THE ARTIFACTS METHOD. IT WILL ONLY WORK IF YOU ENABLE IT IN THE JOB TEMPLATE.
+- name: Health Check for Linux and Windows Nodes
+  hosts: all
   gather_facts: true
 
   tasks:
-    # --- (All your data gathering tasks. No changes here.) ---
+    # --- (All data gathering tasks are correct and stay the same) ---
     - name: Set OS family fact
       set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
-
     - name: Run check.sh on Linux
       when: os_family == "RedHat"
       script: scripts/check.sh
       register: linux_script_out
       changed_when: false
-
     - name: Run check.ps1 on Windows
       when: os_family == "Windows"
       block:
@@ -25,7 +22,6 @@
         - win_shell: C:\Temp\check.ps1
           register: win_script_out
           changed_when: false
-
     - name: Parse output, set facts, and determine status atomically
       set_fact:
         cpu: "{{ cpu_val }}"
@@ -38,35 +34,21 @@
         ram_val: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
         disk_val: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
 
-# =========================================================================
-# PLAY 2: CONNECT TO THE AWX CONTROL NODE AND WRITE THE FINAL LOG FILE
-# =========================================================================
-- name: Health Check - Final Report Generation
-  hosts: 10.206.2.20  # <-- Explicitly target YOUR AWX server
-  connection: ssh       # <-- Connect via SSH, not locally in the container
-  gather_facts: false
-  become: true          # <-- Use the sudo privilege escalation from your credential
-
-  tasks:
-    - name: Create log directory /var/log/ansible_health_logs
-      # 'become: true' allows this task to run as root to create the directory
-      file:
-        path: "/var/log/ansible_health_logs"
-        state: directory
-        mode: '0755'
-
-    - name: Generate and save summary to the log file
-      copy:
-        content: |
+    # ================================
+    # Final Reporting Task
+    # ================================
+    - name: Generate and Save Report to Job Artifacts
+      run_once: true
+      delegate_to: localhost
+      blockinfile:
+        # This is the special variable for the artifacts directory
+        path: "{{ ansible_runner_artifacts_dir }}/health_check_report.log"
+        create: yes
+        block: |
           ####################################################################
           #              Node Health Check Summary Report                    #
-          #              Job Run Time: {{ lookup('pipe', 'date') }}
           ####################################################################
-          {% for host in hostvars.keys() %}
-          {% if host != '10.206.2.20' %}
+          {% for host in ansible_play_hosts_all %}
           HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
-          {% endif %}
           {% endfor %}
           ####################################################################
-        # 'become: true' allows this task to write the file as root
-        dest: "/var/log/ansible_health_logs/health_check_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.log"
