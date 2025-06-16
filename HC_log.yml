@@ -11,101 +11,93 @@
     # ================================
     # Linux Section - check.sh
     # ================================
-    - name: Copy check.sh to Linux node
-      when: os_family == "RedHat"
-      copy:
-        src: scripts/check.sh
-        dest: /usr/local/bin/check.sh
-        mode: '0755'
-
     - name: Run check.sh on Linux
       when: os_family == "RedHat"
-      shell: /usr/local/bin/check.sh
+      # The 'script' module is efficient: it copies the script to a temp location,
+      # executes it, and then cleans up automatically.
+      script: scripts/check.sh
       register: linux_script_out
       changed_when: false
 
     # ================================
     # Windows Section - check.ps1
     # ================================
-    - name: Ensure C:\Scripts exists on Windows
-      when: os_family == "Windows"
-      win_file:
-        path: C:\Scripts
-        state: directory
-
-    - name: Copy check.ps1 to Windows node
-      when: os_family == "Windows"
-      win_copy:
-        src: scripts/check.ps1
-        dest: C:\Scripts\check.ps1
-
     - name: Run check.ps1 on Windows
       when: os_family == "Windows"
-      win_shell: C:\Scripts\check.ps1
-      register: win_script_out
-      changed_when: false
+      block:
+        - name: Ensure C:\Temp exists on Windows
+          win_file:
+            path: C:\Temp
+            state: directory
+
+        - name: Copy check.ps1 to Windows node
+          win_copy:
+            src: scripts/check.ps1
+            dest: C:\Temp\check.ps1
+
+        - name: Execute check.ps1 on Windows
+          win_shell: C:\Temp\check.ps1
+          register: win_script_out
+          changed_when: false
 
     # ================================
     # Parse Output and Set Health Status
     # ================================
     - name: Parse script output and set resource facts
       set_fact:
-        cpu: "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | float) }}"
-        ram: "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | float) }}"
-        disk: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | float) }}"
+        # NOTE: This method depends on your scripts always producing output in the
+        # exact format: CPU=value RAM=value DISK=value
+        cpu: "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first) }}"
+        ram: "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first) }}"
+        disk: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first) }}"
       vars:
-        script_output: >-
-          {{
-            linux_script_out.stdout if os_family == 'RedHat'
-            else win_script_out.stdout
-          }}
+        # This variable cleanly selects the correct output based on OS
+        script_output: "{{ linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout }}"
 
+    # FIX 1: TYPE ERROR
     - name: Determine health status
       set_fact:
-        status: "{{ 'CRITICAL' if cpu > 60 or ram > 60 or disk > 60 else 'GOOD' }}"
+        # Re-apply the |float filter at the moment of comparison for reliability.
+        status: "{{ 'CRITICAL' if cpu | float > 60 or ram | float > 60 or disk | float > 60 else 'GOOD' }}"
 
     # ================================
     # Summary Reporting
     # ================================
-    - name: Generate timestamp
-      run_once: true
-      delegate_to: localhost
-      set_fact:
-        job_log_id: "{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+    - name: Generate report and save to log file
+      run_once: true          # This entire block runs only once
+      delegate_to: localhost  # All tasks inside run on the control node (AWX container)
+      block:
+        - name: Generate timestamp for Job ID
+          set_fact:
+            job_log_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
 
-    - name: Create log directory on control node if not exists
-      run_once: true
-      delegate_to: localhost
-      file:
-        path: "/var/log/ansible_health_logs"
-        state: directory
-        mode: '0755'
+        # FIX 2: LOG FILE PERMISSIONS
+        - name: Create log directory in /tmp on control node
+          # We write to /tmp because the AWX user has permission there.
+          # /var/log is protected and will cause a "Permission denied" error.
+          file:
+            path: "/tmp/ansible_health_logs"
+            state: directory
+            mode: '0755'
 
-    - name: Construct full health summary
-      run_once: true
-      delegate_to: localhost
-      set_fact:
-        summary_output: |
-          ####################################################################
-          #              Node Health Check Summary Report                    #
-          ####################################################################
-          {% for host in ansible_play_hosts_all %}
-          HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
-          {% endfor %}
-          ####################################################################
-          Job Run Time: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
-          Job ID: {{ job_log_id }}
-          Executed By: {{ ansible_user_id }}
-          ####################################################################
+        - name: Construct full health summary
+          set_fact:
+            summary_output: |
+              ####################################################################
+              #              Node Health Check Summary Report                    #
+              ####################################################################
+              {% for host in ansible_play_hosts_all %}
+              HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
+              {% endfor %}
+              ####################################################################
+              Job ID: {{ job_log_id }}
+              ####################################################################
 
-    - name: Print summary to console
-      run_once: true
-      debug:
-        msg: "{{ summary_output }}"
+        - name: Print summary to console
+          debug:
+            msg: "{{ summary_output }}"
 
-    - name: Save summary to log file on control node
-      run_once: true
-      delegate_to: localhost
-      copy:
-        content: "{{ summary_output }}"
-        dest: "/var/log/ansible_health_logs/health_check_{{ job_log_id }}.log"
+        - name: Save summary to log file in /tmp on control node
+          copy:
+            content: "{{ summary_output }}"
+            dest: "/tmp/ansible_health_logs/health_check_{{ job_log_id }}.log"
