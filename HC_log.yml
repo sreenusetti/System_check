@@ -1,5 +1,5 @@
 ---
-# THIS PLAYBOOK IS CORRECT AND USES THE RECOMMENDED AWX METHOD
+# THIS PLAYBOOK USES THE ARTIFACTS METHOD. IT WILL ONLY WORK IF YOU ENABLE IT IN THE JOB TEMPLATE.
 - name: Health Check for Linux and Windows Nodes
   hosts: all
   gather_facts: true
@@ -37,11 +37,14 @@
     # ================================
     # Final Reporting Task
     # ================================
-    - name: Generate and Display Final Report in AWX Job Output
+    - name: Generate and Save Report to Job Artifacts
       run_once: true
       delegate_to: localhost
-      debug:
-        msg: |
+      blockinfile:
+        # This is the special variable for the artifacts directory
+        path: "{{ ansible_runner_artifacts_dir }}/health_check_report.log"
+        create: yes
+        block: |
           ####################################################################
           #              Node Health Check Summary Report                    #
           ####################################################################
