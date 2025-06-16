@@ -1,0 +1,83 @@
+---
+- name: Health Check for Linux and Windows Nodes
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Set OS family fact
+      set_fact:
+        os_family: "{{ ansible_facts['os_family'] }}"
+
+    # Linux: run check.sh
+    - name: Run check.sh on Linux
+      when: os_family == "RedHat"
+      script: scripts/check.sh
+      register: linux_script_out
+      changed_when: false
+
+    # Windows: run check.ps1
+    - name: Run check.ps1 on Windows
+      when: os_family == "Windows"
+      block:
+        - win_file:
+            path: C:\Temp
+            state: directory
+
+        - win_copy:
+            src: scripts/check.ps1
+            dest: C:\Temp\check.ps1
+
+        - win_shell: C:\Temp\check.ps1
+          register: win_script_out
+          changed_when: false
+
+    # Extract and evaluate health data
+    - name: Parse output, set facts, and determine status atomically
+      set_fact:
+        cpu: "{{ cpu_val }}"
+        ram: "{{ ram_val }}"
+        disk: "{{ disk_val }}"
+        status: "{{ 'CRITICAL' if cpu_val | float > 60 or ram_val | float > 60 or disk_val | float > 60 else 'GOOD' }}"
+      vars:
+        script_output: "{{ linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout }}"
+        cpu_val: "{{ script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
+        ram_val: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
+        disk_val: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
+
+    # Final report generation
+    - name: Generate and Display Final Report in AWX Job Output
+      run_once: true
+      delegate_to: localhost
+      set_fact:
+        summary_report: |
+          ####################################################################
+          #              Node Health Check Summary Report                    #
+          ####################################################################
+          {% for host in ansible_play_hosts_all %}
+          HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
+          {% endfor %}
+          ####################################################################
+          Job Time: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          Executed By: {{ ansible_user_id }}
+          ####################################################################
+
+    - name: Print summary report in console
+      run_once: true
+      debug:
+        msg: "{{ summary_report }}"
+
+    # Ensure /var/log/ansible_health_logs exists
+    - name: Create log directory on AWX control node
+      run_once: true
+      delegate_to: localhost
+      file:
+        path: /var/log/ansible_health_logs
+        state: directory
+        mode: '0755'
+
+    - name: Write log file to AWX control node
+      run_once: true
+      delegate_to: localhost
+      copy:
+        content: "{{ summary_report }}"
+        dest: "/var/log/ansible_health_logs/health_check_{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}.log"
