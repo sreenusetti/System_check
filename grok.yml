@@ -60,34 +60,31 @@
         disk_val: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default('0')) if script_output else '0' }}"
 
 # ----------------------------------------------------------------------
-- name: Save Health Summary on AWX Control Node
-  hosts: localhost
-  connection: local
+- name: Save Health Summary on Windows Node 10.206.2.30
+  hosts: 10.206.2.30
   gather_facts: true
   vars:
-    log_dir: /root/health_check_logs
-    log_file: "{{ log_dir }}/health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
+    log_dir: C:\Temp\logfile
+    log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
 
   tasks:
     - name: Debug second play execution
       ansible.builtin.debug:
-        msg: "Starting log file creation on localhost as user {{ ansible_user_id }}"
+        msg: "Starting log file creation on {{ inventory_hostname }} as user {{ ansible_user_id }}"
 
     - name: Debug log file path
       ansible.builtin.debug:
         msg: "Log file will be created at: {{ log_file }}"
 
-    - name: Ensure log directory exists on control node
-      ansible.builtin.file:
+    - name: Ensure log directory exists on Windows node
+      ansible.windows.win_file:
         path: "{{ log_dir }}"
         state: directory
-        mode: '0700'
-        owner: root
       register: dir_creation
       failed_when: dir_creation.state != 'directory'
 
     - name: Verify log directory exists
-      ansible.builtin.stat:
+      ansible.windows.win_stat:
         path: "{{ log_dir }}"
       register: dir_stat
       failed_when: not dir_stat.stat.exists or not dir_stat.stat.isdir
@@ -117,32 +114,30 @@
           Log File: {{ log_file }}
           ####################################################################
 
-    - name: Write health summary to log file on control node
-      ansible.builtin.copy:
+    - name: Write health summary to log file on Windows node
+      ansible.windows.win_copy:
         content: "{{ summary_output }}"
         dest: "{{ log_file }}"
-        mode: '0600'
-        owner: root
       register: file_creation
-      failed_when: file_creation.state != 'file'
+      failed_when: not file_creation.changed
 
     - name: Verify log file exists
-      ansible.builtin.stat:
+      ansible.windows.win_stat:
         path: "{{ log_file }}"
       register: log_file_stat
-      failed_when: not log_file_stat.stat.exists or not log_file_stat.stat.isreg
+      failed_when: not log_file_stat.stat.exists or not log_file_stat.stat.isfile
 
     - name: Debug log file existence
       ansible.builtin.debug:
-        msg: "Log file {{ log_file }} exists: {{ log_file_stat.stat.exists }} and is a regular file: {{ log_file_stat.stat.isreg }}"
+        msg: "Log file {{ log_file }} exists: {{ log_file_stat.stat.exists }} and is a regular file: {{ log_file_stat.stat.isfile }}"
 
     - name: Set playbook status based on log file creation
       ansible.builtin.set_fact:
-        playbook_status: "{{ 'SUCCESS' if log_file_stat.stat.exists and log_file_stat.stat.isreg else 'FAILED' }}"
+        playbook_status: "{{ 'SUCCESS' if log_file_stat.stat.exists and log_file_stat.stat.isfile else 'FAILED' }}"
 
     - name: Fail playbook if log file creation failed
       ansible.builtin.fail:
-        msg: "Playbook failed: Log file {{ log_file }} was not created successfully. Check permissions for {{ log_dir }} and ensure the user {{ ansible_user_id }} has write access."
+        msg: "Playbook failed: Log file {{ log_file }} was not created successfully on {{ inventory_hostname }}. Check permissions for {{ log_dir }}."
       when: playbook_status == 'FAILED'
 
     - name: Print health summary in job output
