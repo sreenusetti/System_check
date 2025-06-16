@@ -4,13 +4,11 @@
   gather_facts: true
 
   tasks:
+    # --- (All your data gathering tasks remain the same) ---
     - name: Set OS family fact
       set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
 
-    # ================================
-    # Script Execution (No changes here)
-    # ================================
     - name: Run check.sh on Linux
       when: os_family == "RedHat"
       script: scripts/check.sh
@@ -20,57 +18,36 @@
     - name: Run check.ps1 on Windows
       when: os_family == "Windows"
       block:
-        - name: Ensure C:\Temp exists on Windows
-          win_file:
+        - win_file:
             path: C:\Temp
             state: directory
-        - name: Copy check.ps1 to Windows node
-          win_copy:
+        - win_copy:
             src: scripts/check.ps1
             dest: C:\Temp\check.ps1
-        - name: Execute check.ps1 on Windows
-          win_shell: C:\Temp\check.ps1
+        - win_shell: C:\Temp\check.ps1
           register: win_script_out
           changed_when: false
 
-    # ==========================================================
-    # DEFINITIVE FIX: Parse and Determine Status in a Single Task
-    # ==========================================================
     - name: Parse output, set facts, and determine status atomically
       set_fact:
-        # 1. Set the final facts for the report
         cpu: "{{ cpu_val }}"
         ram: "{{ ram_val }}"
         disk: "{{ disk_val }}"
-        # 3. Determine status using the numeric local variables
         status: "{{ 'CRITICAL' if cpu_val | float > 60 or ram_val | float > 60 or disk_val | float > 60 else 'GOOD' }}"
       vars:
-        # This block defines local variables available ONLY inside this task
         script_output: "{{ linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout }}"
-        # 2. Extract values into temporary local variables
         cpu_val: "{{ script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
         ram_val: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
         disk_val: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
 
-    # ====================================================
-    # Summary Reporting (With Correction for Log Path)
-    # ====================================================
-    - name: Generate report and save to log file
+    # ================================
+    # Summary Reporting
+    # ================================
+    - name: Generate and display final report
       run_once: true
       delegate_to: localhost
       block:
-        - name: Generate timestamp for Job ID
-          set_fact:
-            job_log_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
-
-        # IMPORTANT: Fix for the logging issue
-        - name: Create log directory in /tmp on control node
-          # You MUST write to /tmp. The AWX user does not have permission for /var/log.
-          file:
-            path: "/tmp/ansible_health_logs"
-            state: directory
-            mode: '0755'
-
+        # --- Task 1: Construct the report content ---
         - name: Construct full health summary
           set_fact:
             summary_output: |
@@ -81,14 +58,18 @@
               HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
               {% endfor %}
               ####################################################################
-              Job ID: {{ job_log_id }}
-              ####################################################################
 
-        - name: Print summary to console
+        # --- Task 2: Print the report to the AWX Job Log (This is your permanent log) ---
+        - name: Print summary to console (This is the official job log)
           debug:
-            msg: "{{ summary_output }}"
+            msg: "{{ summary_output.split('\n') }}"
 
-        - name: Save summary to log file in /tmp on control node
-          copy:
-            content: "{{ summary_output }}"
-            dest: "/tmp/ansible_health_logs/health_check_{{ job_log_id }}.log"
+        # --- Task 3 (Optional): Create a temporary file inside the job container ---
+        - name: Save summary to a TEMPORARY log file for debugging
+          # NOTE: This file will be DELETED when the job finishes.
+          # The REAL permanent log is the debug output above.
+          # The blockinfile module is more suitable here than copy.
+          blockinfile:
+            path: "/tmp/health_check_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.log"
+            create: yes
+            block: "{{ summary_output }}"
