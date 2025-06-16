@@ -1,46 +1,28 @@
-- name: Save Health Summary on AWX control node
-  hosts: health_summary
+---
+- name: Create log directory and file on Windows host
+  hosts: win_nodes
   gather_facts: false
-  run_once: true
+
   vars:
-    log_dir: "/var/tmp/health_check_logs"
-    log_file: "{{ log_dir }}/{{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}.log"
+    log_dir: 'C:\\tmp\\log'
+    log_file: 'C:\\tmp\\log\\lofile.log'
+    log_content: |
+      #####################################################
+      #               Windows Node Log File               #
+      #####################################################
+      Hostname: {{ inventory_hostname }}
+      Timestamp: {{ ansible_date_time.iso8601 }}
+      Message: Log file created via Ansible AWX.
+      #####################################################
 
   tasks:
-    - name: Create directory for logs (safe path)
-      file:
+    - name: Ensure log directory exists on Windows
+      ansible.windows.win_file:
         path: "{{ log_dir }}"
         state: directory
-        mode: '0775'
 
-    - name: Build summary from all hosts
-      set_fact:
-        summary_output: |
-          ####################################################################
-          #                    Node Health Check Report                      #
-          ####################################################################
-          {% for host in groups['health_summary'] %}
-          Hostname: {{ '%-20s' | format(hostvars[host].hostname) }}
-          OS:       {{ hostvars[host].os }}
-          CPU:      {{ hostvars[host].cpu }}%
-          RAM:      {{ hostvars[host].ram }}%
-          DISK:     {{ hostvars[host].disk }}%
-          STATUS:   {{ hostvars[host].status }}
-          --------------------------------------------------------------------
-          {% endfor %}
-          Job ID:   {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
-          Time:     {{ ansible_date_time.iso8601 }}
-          Executed by: {{ ansible_user_id }}
-          Log File: {{ log_file }}
-          ####################################################################
-
-    - name: Write log summary to control node path
-      copy:
-        content: "{{ summary_output }}"
+    - name: Write log content to file
+      ansible.windows.win_copy:
+        content: "{{ log_content }}"
         dest: "{{ log_file }}"
-        mode: '0644'
-      delegate_to: localhost
-
-    - name: Print log summary in job output
-      debug:
-        msg: "{{ summary_output.split('\n') }}"
+        force: true  # Overwrites each time. Use 'false' to prevent overwriting
