@@ -45,12 +45,16 @@
               register: script_out
               changed_when: false
 
-        # --- ✅ FIXED: Parse output with robust default handling ---
-        - name: Parse script output and set health facts
+        # --- ✅ FINAL FIX: Robustly extract CPU, RAM, and DISK values ---
+        - name: Extract CPU, RAM, DISK values
           ansible.builtin.set_fact:
-            cpu: "{{ (script_out.stdout | regex_search('CPU=([\\d.]+)', '\\1') | default(['0'], true) | first | float) }}"
-            ram: "{{ (script_out.stdout | regex_search('RAM=([\\d.]+)', '\\1') | default(['0'], true) | first | float) }}"
-            disk: "{{ (script_out.stdout | regex_search('DISK=([\\d.]+)', '\\1') | default(['0'], true) | first | float) }}"
+            # Match the line first, then extract the value. This prevents the 'NoneType' error.
+            cpu: >-
+              {{ (script_out.stdout | regex_search('CPU=([\\d.]+)')) | regex_replace('^.*=', '') | default(0) | float }}
+            ram: >-
+              {{ (script_out.stdout | regex_search('RAM=([\\d.]+)')) | regex_replace('^.*=', '') | default(0) | float }}
+            disk: >-
+              {{ (script_out.stdout | regex_search('DISK=([\\d.]+)')) | regex_replace('^.*=', '') | default(0) | float }}
             status: "CHECK_COMPLETE"
           when: script_out is defined and script_out.stdout is defined
 
@@ -83,7 +87,7 @@
           ####################################################################
           {% for host in ansible_play_hosts_all %}
           {% set h = hostvars[host] %}
-          HOST: {{ '%-20s' | format(h.inventory_hostname) }} | OS: {{ '%-10s' | format(h.ansible_facts.os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((h.cpu | round(2) | string ~ '%') if h.cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((h.ram | round(2) | string ~ '%') if h.ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((h.disk | round(2) | string ~ '%') if h.disk is defined else 'N/A') }} | STATUS: {{ h.status | default('UNKNOWN') }}
+          HOST: {{ '%-20s' | format(h.inventory_hostname) }} | OS: {{ '%-10s' | format(h.ansible_facts.os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((h.cpu | default(0) | round(2) | string ~ '%')) }} | RAM: {{ '%-8s' | format((h.ram | default(0) | round(2) | string ~ '%')) }} | Disk: {{ '%-8s' | format((h.disk | default(0) | round(2) | string ~ '%')) }} | STATUS: {{ h.status | default('UNKNOWN') }}
           {% endfor %}
           ####################################################################
 
@@ -108,9 +112,9 @@
               {% set h = hostvars[host] %}
               Hostname: {{ '%-20s' | format(h.inventory_hostname) }}
               OS:       {{ h.ansible_facts.os_family | default('N/A') }}
-              CPU:      {{ (h.cpu | round(2) | string + '%') if h.cpu is defined else 'N/A' }}
-              RAM:      {{ (h.ram | round(2) | string + '%') if h.ram is defined else 'N/A' }}
-              DISK:     {{ (h.disk | round(2) | string + '%') if h.disk is defined else 'N/A' }}
+              CPU:      {{ (h.cpu | default(0) | round(2) | string + '%') }}
+              RAM:      {{ (h.ram | default(0) | round(2) | string + '%') }}
+              DISK:     {{ (h.disk | default(0) | round(2) | string + '%') }}
               STATUS:   {{ h.status | default('CHECK_FAILED') }}
               --------------------------------------------------------------------
               {% endfor %}
