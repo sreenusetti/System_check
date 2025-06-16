@@ -65,13 +65,17 @@
         status: "{{ 'CRITICAL' if (cpu | float) > 60 or (ram | float) > 60 or (disk | float) > 60 else 'GOOD' }}"
 
     # ================================
-    # Summary Report
+    # Summary Report + Save to Host
     # ================================
-    - name: Generate job ID or timestamp
+    - name: Generate timestamp
+      run_once: true
+      delegate_to: localhost
       set_fact:
-        job_log_id: "{{ ansible_job_id | default(ansible_date_time.epoch) }}"
+        job_log_id: "{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
 
-    - name: Construct summary content
+    - name: Construct full health summary
+      run_once: true
+      delegate_to: localhost
       set_fact:
         summary_output: |
           ####################################################################
@@ -87,15 +91,14 @@
           ####################################################################
 
     - name: Print summary to console
+      run_once: true
       debug:
         msg: "{{ summary_output }}"
-      run_once: true
 
-      
-      - name: Save summary report to file on AWX host (via temp file method)
+    - name: Write summary to real AWX host path
       run_once: true
       delegate_to: localhost
       local_action:
         module: copy
         content: "{{ summary_output }}"
-        dest: "/var/lib/awx/projects/logs/health_check_{{ job_log_id }}.log"
+        dest: "/var/log/ansible_health_logs/health_check_{{ job_log_id }}.log"
