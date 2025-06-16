@@ -5,13 +5,13 @@
 
   tasks:
     - name: Set OS family fact
-      set_fact:
+      ansible.builtin.set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
 
     # --- Linux ---
     - name: Run check.sh on Linux
       when: os_family == "RedHat"
-      script: scripts/check.sh
+      ansible.builtin.script: scripts/check.sh
       register: linux_script_out
       changed_when: false
 
@@ -20,71 +20,80 @@
       when: os_family == "Windows"
       block:
         - name: Ensure Windows temp directory exists
-          win_file:
+          ansible.windows.win_file:
             path: C:\Temp
             state: directory
 
         - name: Copy check.ps1 to Windows node
-          win_copy:
+          ansible.windows.win_copy:
             src: scripts/check.ps1
             dest: C:\Temp\check.ps1
 
         - name: Execute check.ps1
-          win_shell: C:\Temp\check.ps1
+          ansible.windows.win_shell: C:\Temp\check.ps1
           register: win_script_out
           changed_when: false
 
     # --- Parse Output ---
     - name: Parse script output and determine status
-      set_fact:
+      ansible.builtin.set_fact:
         cpu: "{{ cpu_val }}"
         ram: "{{ ram_val }}"
         disk: "{{ disk_val }}"
         status: "{{ 'CRITICAL' if cpu_val | float > 60 or ram_val | float > 60 or disk_val | float > 60 else 'GOOD' }}"
       vars:
         script_output: "{{ linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout }}"
-        cpu_val: "{{ script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
-        ram_val: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
-        disk_val: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
+        cpu_val: "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | default('0')) if script_output is defined else '0' }}"
+        ram_val: "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default('0')) if script_output is defined else '0' }}"
+        disk_val: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default('0')) if script_output is defined else '0' }}"
 
 # ----------------------------------------------------------------------
 - name: Save Health Summary on AWX Control Node
   hosts: localhost
+  connection: local
   gather_facts: true
   vars:
-    log_file: "/tmp/{{ awx_job_id | default('manual_job') }}.log"
+    log_dir: /tmp/health_check_logs
+    log_file: "{{ log_dir }}/{{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}.log"
 
   tasks:
+    - name: Ensure log directory exists on control node
+      ansible.builtin.file:
+        path: "{{ log_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user_id }}"
+      become: true
+
     - name: Build health summary content
-      set_fact:
+      ansible.builtin.set_fact:
         summary_output: |
           ####################################################################
           #                    Node Health Check Report                      #
           ####################################################################
           {% for host in hostvars if hostvars[host].cpu is defined %}
-          HOST:   {{ '%-20s' | format(hostvars[host].inventory_hostname) }}
-          OS:     {{ hostvars[host].os_family | default('N/A') }}
-          CPU:    {{ hostvars[host].cpu | float | round(2) }}%
-          RAM:    {{ hostvars[host].ram | float | round(2) }}%
-          DISK:   {{ hostvars[host].disk | float | round(2) }}%
-          STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
+          Hostname: {{ '%-20s' | format(hostvars[host].inventory_hostname) }}
+          OS:       {{ hostvars[host].os_family | default('N/A') }}
+          CPU:      {{ hostvars[host].cpu | float | round(2) }}%
+          RAM:      {{ hostvars[host].ram | float | round(2) }}%
+          DISK:     {{ hostvars[host].disk | float | round(2) }}%
+          STATUS:   {{ hostvars[host].status | default('SUCCESS') }}
           --------------------------------------------------------------------
           {% endfor %}
-          Time: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          Job ID:   {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
+          Time:     {{ ansible_date_time.iso8601 }}
           Executed by: {{ ansible_user_id }}
+          Log File: {{ log_file }}
           ####################################################################
 
-    - name: Ensure /tmp directory exists (just in case)
-      file:
-        path: /tmp
-        state: directory
-        mode: '1777'
-
     - name: Write health summary to log file on control node
-      copy:
+      ansible.builtin.copy:
         content: "{{ summary_output }}"
         dest: "{{ log_file }}"
+        mode: '0644'
+        owner: "{{ ansible_user_id }}"
+      become: true
 
     - name: Print health summary in job output
-      debug:
-        msg: "{{ summary_output }}"
+      ansible.builtin.debug:
+        msg: "{{ summary_output.split('\n') }}"
