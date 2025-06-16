@@ -62,16 +62,24 @@
 
     - name: Determine health status
       set_fact:
-        status: "{{ 'CRITICAL' if (cpu | float) > 60 or (ram | float) > 60 or (disk | float) > 60 else 'GOOD' }}"
+        status: "{{ 'CRITICAL' if cpu > 60 or ram > 60 or disk > 60 else 'GOOD' }}"
 
     # ================================
-    # Summary Report + Save to Host
+    # Summary Reporting
     # ================================
     - name: Generate timestamp
       run_once: true
       delegate_to: localhost
       set_fact:
         job_log_id: "{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+
+    - name: Create log directory on control node if not exists
+      run_once: true
+      delegate_to: localhost
+      file:
+        path: "/var/log/ansible_health_logs"
+        state: directory
+        mode: '0755'
 
     - name: Construct full health summary
       run_once: true
@@ -95,10 +103,9 @@
       debug:
         msg: "{{ summary_output }}"
 
-    - name: Write summary to real AWX host path
+    - name: Save summary to log file on control node
       run_once: true
       delegate_to: localhost
-      local_action:
-        module: copy
+      copy:
         content: "{{ summary_output }}"
         dest: "/var/log/ansible_health_logs/health_check_{{ job_log_id }}.log"
