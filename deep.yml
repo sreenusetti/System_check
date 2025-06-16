@@ -87,5 +87,4 @@
     - name: Append content to log file
       ansible.windows.win_shell: |
         Add-Content -Path "{{ log_file }}" -Value @"
-{{ log_content }}
-"@
+{{ log_content }}"@
