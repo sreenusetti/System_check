@@ -1,97 +1,92 @@
 ---
-- name: Health Check for Linux and Windows Nodes
+- name: Health Check for Linux and Windows Nodes using Git-hosted Scripts
   hosts: all
   gather_facts: true
 
   tasks:
-    - name: Debug first play execution
-      ansible.builtin.debug:
-        msg: "Starting health check for host {{ inventory_hostname }}"
-
     - name: Set OS family fact
       ansible.builtin.set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
-      register: set_fact_result
-      failed_when: set_fact_result.failed
 
-    - name: Debug OS family
-      ansible.builtin.debug:
-        msg: "OS family is {{ os_family }}"
-
-    # --- Linux check ---
-    - name: Run check.sh on Linux
+    # ================================
+    # Linux Section – check.sh
+    # ================================
+    - name: Copy check.sh to Linux node
+      ansible.builtin.copy:
+        src: scripts/check.sh
+        dest: /usr/local/bin/check.sh
+        mode: '0755'
       when: os_family == "RedHat"
-      ansible.builtin.script:
-        cmd: scripts/check.sh
+
+    - name: Run check.sh on Linux
+      ansible.builtin.shell: /usr/local/bin/check.sh
       register: linux_script_out
       changed_when: false
-      failed_when: linux_script_out.rc != 0
+      when: os_family == "RedHat"
 
-    # --- Windows check ---
-    - name: Run check.ps1 on Windows
+    # ================================
+    # Windows Section – check.ps1
+    # ================================
+    - name: Ensure C:\Scripts exists on Windows
+      ansible.windows.win_file:
+        path: C:\Scripts
+        state: directory
       when: os_family == "Windows"
-      block:
-        - name: Ensure Windows temp directory exists
-          ansible.windows.win_file:
-            path: C:\Temp
-            state: directory
 
-        - name: Copy check.ps1 to Windows node
-          ansible.windows.win_copy:
-            src: scripts/check.ps1
-            dest: C:\Temp\check.ps1
+    - name: Copy check.ps1 to Windows node
+      ansible.windows.win_copy:
+        src: scripts/check.ps1
+        dest: C:\Scripts\check.ps1
+      when: os_family == "Windows"
 
-        - name: Execute check.ps1
-          ansible.windows.win_shell: C:\Temp\check.ps1
-          register: win_script_out
-          changed_when: false
-          failed_when: win_script_out.rc != 0
+    - name: Run check.ps1 on Windows
+      ansible.windows.win_shell: C:\Scripts\check.ps1
+      register: win_script_out
+      changed_when: false
+      when: os_family == "Windows"
 
-    # --- Parse script_output into usage variables ---
-    - name: Extract CPU, RAM, and DISK values
+    # ================================
+    # Parse outputs into per-host facts
+    # ================================
+    - name: Extract CPU, RAM, DISK values
       ansible.builtin.set_fact:
-        cpu: >
-          {{ (script_stdout
-              | regex_findall('CPU=(\\d+\\.?\\d*)')
-              | first
-              | default('0', true)) }}
-        ram: >
-          {{ (script_stdout
-              | regex_findall('RAM=(\\d+\\.?\\d*)')
-              | first
-              | default('0', true)) }}
-        disk: >
-          {{ (script_stdout
-              | regex_findall('DISK=(\\d+\\.?\\d*)')
-              | first
-              | default('0', true)) }}
-      vars:
-        script_stdout: >-
-          {{ (linux_script_out.stdout if os_family == 'RedHat'
-              else win_script_out.stdout if os_family == 'Windows'
-              else '') }}
+        cpu: >-
+          {{
+            ( (linux_script_out.stdout if os_family == 'RedHat' else
+                win_script_out.stdout if os_family == 'Windows' else '')
+              | regex_search('CPU=(\\d+\\.?\\d*)', '\\1')
+              | default('0') )
+            | float
+          }}
+        ram: >-
+          {{
+            ( (linux_script_out.stdout if os_family == 'RedHat' else
+                win_script_out.stdout if os_family == 'Windows' else '')
+              | regex_search('RAM=(\\d+\\.?\\d*)', '\\1')
+              | default('0') )
+            | float
+          }}
+        disk: >-
+          {{
+            ( (linux_script_out.stdout if os_family == 'RedHat' else
+                win_script_out.stdout if os_family == 'Windows' else '')
+              | regex_search('DISK=(\\d+\\.?\\d*)', '\\1')
+              | default('0') )
+            | float
+          }}
 
-    - name: Debug extracted values
-      ansible.builtin.debug:
-        msg:
-          - "CPU usage = {{ cpu }}%"
-          - "RAM usage = {{ ram }}%"
-          - "DISK usage = {{ disk }}%"
-
-    - name: Determine overall status
+    - name: Determine health status
       ansible.builtin.set_fact:
         status: >-
           {{ 'CRITICAL'
-             if (cpu  | float > 60)
-             or (ram  | float > 60)
-             or (disk | float > 60)
+             if cpu > 60 or ram > 60 or disk > 60
              else 'GOOD' }}
 
-    - name: Debug status
+    - name: Debug per-host health
       ansible.builtin.debug:
-        msg: "Overall status for {{ inventory_hostname }} is {{ status }}"
+        msg:
+          - "Host {{ inventory_hostname }} → CPU={{ cpu }}% RAM={{ ram }}% DISK={{ disk }}% STATUS={{ status }}"
 
-# ----------------------------------------------------------------------
 - name: Save Health Summary on Windows Node 10.206.2.30
   hosts: 10.206.2.30
   gather_facts: true
@@ -101,14 +96,6 @@
     log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
 
   tasks:
-    - name: Debug second play execution
-      ansible.builtin.debug:
-        msg: "Starting log file creation on {{ inventory_hostname }} as {{ ansible_user_id }}"
-
-    - name: Debug log file path
-      ansible.builtin.debug:
-        msg: "Will write report to {{ log_file }}"
-
     - name: Ensure log directory exists
       ansible.windows.win_file:
         path: "{{ log_dir }}"
@@ -120,23 +107,19 @@
       register: dir_stat
       failed_when: not dir_stat.stat.exists or not dir_stat.stat.isdir
 
-    - name: Debug log directory existence
-      ansible.builtin.debug:
-        msg: "Directory {{ log_dir }} exists={{ dir_stat.stat.exists }}, isdir={{ dir_stat.stat.isdir }}"
-
     - name: Build health summary content
       ansible.builtin.set_fact:
         summary_output: |
           ####################################################################
-          #                    Node Health Check Report                      #
+          #                Node Health Check Summary Report                 #
           ####################################################################
-          {% for host in hostvars if hostvars[host].cpu is defined %}
-          Hostname: {{ '%-20s' | format(hostvars[host].inventory_hostname) }}
-          OS:       {{ hostvars[host].os_family | default('N/A') }}
-          CPU:      {{ hostvars[host].cpu  | float | round(2) }}%
-          RAM:      {{ hostvars[host].ram  | float | round(2) }}%
-          DISK:     {{ hostvars[host].disk | float | round(2) }}%
-          STATUS:   {{ hostvars[host].status | default('SUCCESS') }}
+          {% for host in ansible_play_hosts_all %}
+          Host:   {{ '%-20s'|format(hostvars[host].inventory_hostname) }}
+          OS:     {{ '%-10s'|format(hostvars[host].os_family | default('N/A')) }}
+          CPU:    {{ '%6.2f%%'|format(hostvars[host].cpu  | default(0)) }}
+          RAM:    {{ '%6.2f%%'|format(hostvars[host].ram  | default(0)) }}
+          DISK:   {{ '%6.2f%%'|format(hostvars[host].disk | default(0)) }}
+          STATUS: {{ hostvars[host].status | default('UNKNOWN') }}
           --------------------------------------------------------------------
           {% endfor %}
           Job ID:      {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
@@ -160,13 +143,13 @@
 
     - name: Debug log file existence
       ansible.builtin.debug:
-        msg: "Log file exists={{ log_file_stat.stat.exists }}, isreg={{ log_file_stat.stat.isreg }}"
+        msg: "Log file {{ log_file }} exists={{ log_file_stat.stat.exists }}, isreg={{ log_file_stat.stat.isreg }}"
 
-    - name: Fail if log file creation failed
+    - name: Fail if log file wasn’t created
       ansible.builtin.fail:
-        msg: "Log file {{ log_file }} was not created. Check permissions."
+        msg: "Could not write health summary to {{ log_file }} – check permissions."
       when: not (log_file_stat.stat.exists and log_file_stat.stat.isreg)
 
-    - name: Print health summary in job output
+    - name: Print summary in AWX job output
       ansible.builtin.debug:
         msg: "{{ summary_output.split('\n') }}"
