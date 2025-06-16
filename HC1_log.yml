@@ -8,31 +8,34 @@
       set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
 
-    # Linux: Run check.sh
+    # --- Linux execution ---
     - name: Run check.sh on Linux
       when: os_family == "RedHat"
-      script: scripts/check.sh
+      script: ../scripts/check.sh
       register: linux_script_out
       changed_when: false
 
-    # Windows: Run check.ps1
+    # --- Windows execution ---
     - name: Run check.ps1 on Windows
       when: os_family == "Windows"
       block:
-        - win_file:
+        - name: Ensure C:\Temp exists
+          win_file:
             path: C:\Temp
             state: directory
 
-        - win_copy:
-            src: scripts/check.ps1
+        - name: Copy check.ps1 to Windows node
+          win_copy:
+            src: ../scripts/check.ps1
             dest: C:\Temp\check.ps1
 
-        - win_shell: C:\Temp\check.ps1
+        - name: Execute PowerShell script
+          win_shell: C:\Temp\check.ps1
           register: win_script_out
           changed_when: false
 
-    # Extract and determine status
-    - name: Parse output, set facts, and determine status
+    # --- Extract and set metrics ---
+    - name: Parse script output and determine health status
       set_fact:
         cpu: "{{ cpu_val }}"
         ram: "{{ ram_val }}"
@@ -40,42 +43,49 @@
         status: "{{ 'CRITICAL' if cpu_val | float > 60 or ram_val | float > 60 or disk_val | float > 60 else 'GOOD' }}"
       vars:
         script_output: "{{ linux_script_out.stdout if os_family == 'RedHat' else win_script_out.stdout }}"
-        cpu_val: "{{ script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
-        ram_val: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
-        disk_val: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
+        cpu_val: "{{ script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | default('0') }}"
+        ram_val: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default('0') }}"
+        disk_val: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default('0') }}"
 
-- name: Save summary report on control node
+# ----------------------------------------------------------------------
+- name: Save Health Summary on Control Node (/tmp)
   hosts: localhost
   gather_facts: true
   vars:
     log_dir: /tmp/health_logs
-    log_filename: "health_check_{{ ansible_date_time.date }}_{{ ansible_date_time.time | replace(':','') }}.log"
-  tasks:
-    - name: Build final health summary
-      set_fact:
-        summary_output: |
-          ####################################################################
-          #              Node Health Check Summary Report                    #
-          ####################################################################
-          {% for host in hostvars %}
-          HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
-          {% endfor %}
-          ####################################################################
-          Run Time: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
-          Executed By: {{ ansible_user_id }}
-          ####################################################################
+    log_filename: "health_check_{{ ansible_date_time.date }}_{{ ansible_date_time.time | regex_replace(':', '') }}.log"
 
-    - name: Ensure log directory exists on control node
+  tasks:
+    - name: Ensure log directory exists
       file:
         path: "{{ log_dir }}"
         state: directory
         mode: '0755'
 
-    - name: Write report to control node
+    - name: Build summary content
+      set_fact:
+        summary_output: |
+          ####################################################################
+          #                    Node Health Check Report                      #
+          ####################################################################
+          {% for host in hostvars if hostvars[host].cpu is defined %}
+          HOST:   {{ hostvars[host].inventory_hostname }}
+          OS:     {{ hostvars[host].os_family | default('N/A') }}
+          CPU:    {{ hostvars[host].cpu | float | round(2) }}%
+          RAM:    {{ hostvars[host].ram | float | round(2) }}%
+          DISK:   {{ hostvars[host].disk | float | round(2) }}%
+          STATUS: {{ hostvars[host].status | default('FAILED') }}
+          --------------------------------------------------------------------
+          {% endfor %}
+          Time: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          Executed by: {{ ansible_user_id }}
+          ####################################################################
+
+    - name: Write health summary to log file
       copy:
         content: "{{ summary_output }}"
         dest: "{{ log_dir }}/{{ log_filename }}"
 
-    - name: Print summary in job output
+    - name: Display summary in AWX job output
       debug:
         msg: "{{ summary_output }}"
