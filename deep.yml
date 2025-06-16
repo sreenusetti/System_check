@@ -1,28 +1,91 @@
 ---
-- name: Create log directory and file on Windows host
+- name: Health Check for Linux and Windows Nodes
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Set OS family fact
+      set_fact:
+        os_family: "{{ ansible_facts['os_family'] }}"
+
+    - name: Run check.sh on Linux
+      when: os_family == "RedHat"
+      ansible.builtin.script: scripts/check.sh
+      register: linux_script_out
+      changed_when: false
+      failed_when: linux_script_out.rc != 0
+
+    - name: Run check.ps1 on Windows
+      when: os_family == "Windows"
+      block:
+        - name: Ensure Temp directory exists
+          ansible.windows.win_file:
+            path: C:\Temp
+            state: directory
+
+        - name: Copy check.ps1 to target
+          ansible.windows.win_copy:
+            src: scripts/check.ps1
+            dest: C:\Temp\check.ps1
+
+        - name: Execute PowerShell script
+          ansible.windows.win_shell: C:\Temp\check.ps1
+          register: win_script_out
+          changed_when: false
+          failed_when: win_script_out.rc != 0
+
+    - name: Extract CPU/RAM/DISK usage
+      set_fact:
+        cpu: "{{ script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | default('0') }}"
+        ram: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default('0') }}"
+        disk: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default('0') }}"
+        status: "{{ 'CRITICAL' if (cpu | float > 60 or ram | float > 60 or disk | float > 60) else 'GOOD' }}"
+      vars:
+        script_output: >-
+          {{ linux_script_out.stdout if os_family == 'RedHat'
+          else win_script_out.stdout if os_family == 'Windows'
+          else '' }}
+
+    - name: Collect results for localhost reporting
+      add_host:
+        name: "localhost"
+        groups: health_summary
+        hostname: "{{ inventory_hostname }}"
+        os: "{{ os_family }}"
+        cpu: "{{ cpu }}"
+        ram: "{{ ram }}"
+        disk: "{{ disk }}"
+        status: "{{ status }}"
+
+- name: Append health result log content to file on each Windows host
   hosts: win_nodes
-  gather_facts: false
+  gather_facts: true
 
   vars:
     log_dir: 'C:\\tmp\\log'
     log_file: 'C:\\tmp\\log\\lofile.log'
+    timestamp: "{{ ansible_date_time.iso8601 }}"
     log_content: |
-      #####################################################
-      #               Windows Node Log File               #
-      #####################################################
-      Hostname: {{ inventory_hostname }}
-      Timestamp: {{ ansible_date_time.iso8601 }}
-      Message: Log file created via Ansible AWX.
-      #####################################################
+      ##############################################################
+      #              Windows Node Health Check Report              #
+      ##############################################################
+      Hostname : {{ inventory_hostname }}
+      Timestamp: {{ timestamp }}
+      OS       : {{ ansible_facts['os_family'] }}
+      CPU      : {{ hostvars[inventory_hostname].cpu }}%
+      RAM      : {{ hostvars[inventory_hostname].ram }}%
+      DISK     : {{ hostvars[inventory_hostname].disk }}%
+      STATUS   : {{ hostvars[inventory_hostname].status }}
+      ##############################################################
 
   tasks:
-    - name: Ensure log directory exists on Windows
+    - name: Ensure log directory exists
       ansible.windows.win_file:
         path: "{{ log_dir }}"
         state: directory
 
-    - name: Write log content to file
-      ansible.windows.win_copy:
-        content: "{{ log_content }}"
-        dest: "{{ log_file }}"
-        force: true  # Overwrites each time. Use 'false' to prevent overwriting
+    - name: Append content to log file
+      ansible.windows.win_shell: |
+        Add-Content -Path "{{ log_file }}" -Value @"
+{{ log_content }}
+"@
