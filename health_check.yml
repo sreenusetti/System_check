@@ -8,13 +8,13 @@
       set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
 
-    # ================================
-    # RHEL Section - check.sh
-    # ================================
+    # ====================================
+    # Linux: Create and Run check.sh Script
+    # ====================================
     - name: Copy check.sh to Linux node
       when: os_family == "RedHat"
       copy:
-        src: scripts/check.sh   # ✅ Now inside playbook dir
+        src: scripts/check.sh
         dest: /usr/local/bin/check.sh
         mode: '0755'
 
@@ -24,13 +24,19 @@
       register: linux_script_out
       changed_when: false
 
-    # ================================
-    # Windows Section - check.ps1
-    # ================================
+    # ==========================================
+    # Windows: Create and Run check.ps1 Script
+    # ==========================================
+    - name: Ensure C:\Scripts exists on Windows
+      when: os_family == "Windows"
+      win_file:
+        path: C:\Scripts
+        state: directory
+
     - name: Copy check.ps1 to Windows node
       when: os_family == "Windows"
       win_copy:
-        src: scripts/check.ps1   # ✅ Same here
+        src: scripts/check.ps1
         dest: C:\Scripts\check.ps1
 
     - name: Run check.ps1 on Windows
@@ -39,10 +45,10 @@
       register: win_script_out
       changed_when: false
 
-    # ================================
-    # Parse Output from Script Results
-    # ================================
-    - name: Parse output and set facts
+    # ====================================
+    # Parse Script Output and Set Facts
+    # ====================================
+    - name: Parse output and set resource facts
       set_fact:
         cpu: "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)', '\\1') | first | float) }}"
         ram: "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | float) }}"
@@ -58,9 +64,9 @@
       set_fact:
         status: "{{ 'CRITICAL' if cpu > 60 or ram > 60 or disk > 60 else 'GOOD' }}"
 
-    # ================================
-    # Final Summary in Job Output
-    # ================================
+    # ====================================
+    # Final Summary Report (printed once)
+    # ====================================
     - name: Print summary report to job output
       run_once: true
       delegate_to: localhost
