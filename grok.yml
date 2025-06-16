@@ -18,7 +18,7 @@
       ansible.builtin.debug:
         msg: "OS family set to {{ os_family }} for host {{ inventory_hostname }}"
 
-    # --- Linux ---
+    # --- Linux check ---
     - name: Run check.sh on Linux
       when: os_family == "RedHat"
       ansible.builtin.script: scripts/check.sh
@@ -26,7 +26,7 @@
       changed_when: false
       failed_when: linux_script_out.rc != 0
 
-    # --- Windows ---
+    # --- Windows check ---
     - name: Run check.ps1 on Windows
       when: os_family == "Windows"
       block:
@@ -46,50 +46,33 @@
           changed_when: false
           failed_when: win_script_out.rc != 0
 
-    # --- Parse Output ---
+    # --- Parse Output & Determine Status ---
     - name: Parse script output and determine status
       ansible.builtin.set_fact:
-        cpu: "{{ cpu_val }}"
-        ram: "{{ ram_val }}"
-        disk: "{{ disk_val }}"
-        status: "{{ 'CRITICAL' if (cpu_val | float > 60 or ram_val | float > 60 or disk_val | float > 60) else 'GOOD' }}"
+        cpu:   "{{ (script_output | regex_findall('CPU=(\\d+\\.?\\d*)') | first | default('0')) }}"
+        ram:   "{{ (script_output | regex_findall('RAM=(\\d+\\.?\\d*)') | first | default('0')) }}"
+        disk:  "{{ (script_output | regex_findall('DISK=(\\d+\\.?\\d*)') | first | default('0')) }}"
+        status: >-
+          {{ 'CRITICAL'
+             if (cpu  | float > 60)
+             or (ram  | float > 60)
+             or (disk | float > 60)
+             else 'GOOD' }}
       vars:
         script_output: >-
-          {{
-            linux_script_out.stdout
-            if os_family == 'RedHat'
-            else win_script_out.stdout
-            if os_family == 'Windows'
-            else ''
-          }}
-        cpu_val: >-
-          {{
-            (script_output
-             | regex_search('CPU=(\\d+\\.?\\d*)', '\\1')
-             | first
-             | default('0'))
-          }}
-        ram_val: >-
-          {{
-            (script_output
-             | regex_search('RAM=(\\d+\\.?\\d*)', '\\1')
-             | first
-             | default('0'))
-          }}
-        disk_val: >-
-          {{
-            (script_output
-             | regex_search('DISK=(\\d+\\.?\\d*)', '\\1')
-             | first
-             | default('0'))
-          }}
+          {{ linux_script_out.stdout
+             if os_family == 'RedHat'
+             else win_script_out.stdout
+             if os_family == 'Windows'
+             else '' }}
+
 
 # ----------------------------------------------------------------------
 - name: Save Health Summary on Windows Node 10.206.2.30
   hosts: 10.206.2.30
   gather_facts: true
   vars:
-    log_dir: C:\Temp\logfile
+    log_dir:  C:\Temp\logfile
     log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
 
   tasks:
@@ -126,22 +109,22 @@
           {% for host in hostvars if hostvars[host].cpu is defined %}
           Hostname: {{ '%-20s' | format(hostvars[host].inventory_hostname) }}
           OS:       {{ hostvars[host].os_family | default('N/A') }}
-          CPU:      {{ hostvars[host].cpu | float | round(2) }}%
-          RAM:      {{ hostvars[host].ram | float | round(2) }}%
+          CPU:      {{ hostvars[host].cpu  | float | round(2) }}%
+          RAM:      {{ hostvars[host].ram  | float | round(2) }}%
           DISK:     {{ hostvars[host].disk | float | round(2) }}%
           STATUS:   {{ hostvars[host].status | default('SUCCESS') }}
           --------------------------------------------------------------------
           {% endfor %}
-          Job ID:   {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
-          Time:     {{ ansible_date_time.iso8601 }}
+          Job ID:      {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
+          Time:        {{ ansible_date_time.iso8601 }}
           Executed by: {{ ansible_user_id }}
-          Log File: {{ log_file }}
+          Log File:    {{ log_file }}
           ####################################################################
 
     - name: Write health summary to log file on Windows node
       ansible.windows.win_copy:
         content: "{{ summary_output }}"
-        dest: "{{ log_file }}"
+        dest:    "{{ log_file }}"
       register: file_creation
       failed_when: not file_creation.changed
 
