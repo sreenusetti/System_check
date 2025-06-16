@@ -49,9 +49,27 @@
     # --- Parse Output & Determine Status ---
     - name: Parse script output and determine status
       ansible.builtin.set_fact:
-        cpu:   "{{ (script_output | regex_findall('CPU=(\\d+\\.?\\d*)') | first | default('0')) }}"
-        ram:   "{{ (script_output | regex_findall('RAM=(\\d+\\.?\\d*)') | first | default('0')) }}"
-        disk:  "{{ (script_output | regex_findall('DISK=(\\d+\\.?\\d*)') | first | default('0')) }}"
+        cpu: >
+          {{
+            (script_output
+             | regex_findall('CPU=(\\d+\\.?\\d*)')
+             | first
+             | default('0', true))
+          }}
+        ram: >
+          {{
+            (script_output
+             | regex_findall('RAM=(\\d+\\.?\\d*)')
+             | first
+             | default('0', true))
+          }}
+        disk: >
+          {{
+            (script_output
+             | regex_findall('DISK=(\\d+\\.?\\d*)')
+             | first
+             | default('0', true))
+          }}
         status: >-
           {{ 'CRITICAL'
              if (cpu  | float > 60)
@@ -59,6 +77,7 @@
              or (disk | float > 60)
              else 'GOOD' }}
       vars:
+        # Always define script_output as a string
         script_output: >-
           {{ linux_script_out.stdout
              if os_family == 'RedHat'
