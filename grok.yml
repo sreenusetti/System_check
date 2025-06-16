@@ -3,12 +3,6 @@
   hosts: all
   gather_facts: true
 
-  vars:
-    # Always define script_output as a string, even if empty
-    script_output: >-
-      {{ (linux_script_out.stdout if os_family == 'RedHat' else
-          win_script_out.stdout if os_family == 'Windows' else '') | default('') }}
-
   tasks:
     - name: Debug first play execution
       ansible.builtin.debug:
@@ -57,28 +51,25 @@
     - name: Extract CPU, RAM, and DISK values
       ansible.builtin.set_fact:
         cpu: >
-          {{ (script_output
+          {{ (script_stdout
               | regex_findall('CPU=(\\d+\\.?\\d*)')
               | first
               | default('0', true)) }}
         ram: >
-          {{ (script_output
+          {{ (script_stdout
               | regex_findall('RAM=(\\d+\\.?\\d*)')
               | first
               | default('0', true)) }}
         disk: >
-          {{ (script_output
+          {{ (script_stdout
               | regex_findall('DISK=(\\d+\\.?\\d*)')
               | first
               | default('0', true)) }}
       vars:
-        # override script_output with actual registered variables
-        script_output: >-
-          {{ linux_script_out.stdout
-             if os_family == 'RedHat'
-             else win_script_out.stdout
-             if os_family == 'Windows'
-             else '' }}
+        script_stdout: >-
+          {{ (linux_script_out.stdout if os_family == 'RedHat'
+              else win_script_out.stdout if os_family == 'Windows'
+              else '') }}
 
     - name: Debug extracted values
       ansible.builtin.debug:
@@ -165,16 +156,16 @@
       ansible.windows.win_stat:
         path: "{{ log_file }}"
       register: log_file_stat
-      failed_when: not log_file_stat.stat.exists or not log_file_stat.stat.isfile
+      failed_when: not log_file_stat.stat.exists or not log_file_stat.stat.isreg
 
     - name: Debug log file existence
       ansible.builtin.debug:
-        msg: "Log file exists={{ log_file_stat.stat.exists }}, isfile={{ log_file_stat.stat.isfile }}"
+        msg: "Log file exists={{ log_file_stat.stat.exists }}, isreg={{ log_file_stat.stat.isreg }}"
 
     - name: Fail if log file creation failed
       ansible.builtin.fail:
         msg: "Log file {{ log_file }} was not created. Check permissions."
-      when: not (log_file_stat.stat.exists and log_file_stat.stat.isfile)
+      when: not (log_file_stat.stat.exists and log_file_stat.stat.isreg)
 
     - name: Print health summary in job output
       ansible.builtin.debug:
