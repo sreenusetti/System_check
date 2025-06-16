@@ -11,8 +11,6 @@
   tasks:
     # ========================================================================
     # BLOCK 1: Execute OS-Specific Health Check Scripts on each host
-    # This block runs on every host in the inventory.
-    # A rescue block catches any failures and sets a default status.
     # ========================================================================
     - name: Run OS-specific health check
       block:
@@ -23,9 +21,8 @@
             - name: Copy check.sh to Linux node
               ansible.builtin.copy:
                 src: scripts/check.sh
-                dest: /tmp/check.sh  # Using /tmp is safer for temporary scripts
+                dest: /tmp/check.sh
                 mode: '0755'
-
             - name: Execute check.sh on Linux
               ansible.builtin.shell: /tmp/check.sh
               register: script_out
@@ -39,34 +36,34 @@
               ansible.windows.win_file:
                 path: C:\Temp\ansible_scripts
                 state: directory
-
             - name: Copy check.ps1 to Windows node
               ansible.windows.win_copy:
                 src: scripts/check.ps1
                 dest: C:\Temp\ansible_scripts\check.ps1
-
             - name: Execute check.ps1 on Windows
               ansible.windows.win_shell: C:\Temp\ansible_scripts\check.ps1
               register: script_out
               changed_when: false
 
-        # --- Parse output from whichever script ran ---
+        # --- ✅ FIXED: Parse output with robust default handling ---
         - name: Parse script output and set health facts
           ansible.builtin.set_fact:
-            cpu: "{{ (script_out.stdout | regex_search('CPU=([\\d.]+)', '\\1') | first | default(0) | float) }}"
-            ram: "{{ (script_out.stdout | regex_search('RAM=([\\d.]+)', '\\1') | first | default(0) | float) }}"
-            disk: "{{ (script_out.stdout | regex_search('DISK=([\\d.]+)', '\\1') | first | default(0) | float) }}"
+            cpu: "{{ (script_out.stdout | regex_search('CPU=([\\d.]+)', '\\1') | default(['0'], true) | first | float) }}"
+            ram: "{{ (script_out.stdout | regex_search('RAM=([\\d.]+)', '\\1') | default(['0'], true) | first | float) }}"
+            disk: "{{ (script_out.stdout | regex_search('DISK=([\\d.]+)', '\\1') | default(['0'], true) | first | float) }}"
             status: "CHECK_COMPLETE"
-          when: script_out.stdout is defined
+          when: script_out is defined and script_out.stdout is defined
 
       rescue:
-        - name: Set failure status if script execution failed
+        - name: Set failure status if script execution or parsing failed
           ansible.builtin.set_fact:
             status: "CHECK_FAILED"
+            cpu: 0
+            ram: 0
+            disk: 0
 
     # ========================================================================
     # BLOCK 2: Determine final health status based on parsed metrics
-    # This task also runs on every host that completed the check.
     # ========================================================================
     - name: Determine final health status from metrics
       ansible.builtin.set_fact:
@@ -75,7 +72,6 @@
 
     # ========================================================================
     # BLOCK 3: Print a quick summary to the console output
-    # This runs once on the controller for immediate feedback.
     # ========================================================================
     - name: Print summary report to job output
       run_once: true
@@ -93,7 +89,6 @@
 
     # ========================================================================
     # BLOCK 4: Generate and save the detailed report on the target Windows node
-    # These tasks will ONLY run on the host specified in 'reporting_host'.
     # ========================================================================
     - name: Generate and save detailed report file
       when: inventory_hostname == reporting_host
