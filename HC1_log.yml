@@ -8,14 +8,14 @@
       set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
 
-    # Linux: run check.sh
+    # Linux: Run check.sh
     - name: Run check.sh on Linux
       when: os_family == "RedHat"
       script: scripts/check.sh
       register: linux_script_out
       changed_when: false
 
-    # Windows: run check.ps1
+    # Windows: Run check.ps1
     - name: Run check.ps1 on Windows
       when: os_family == "Windows"
       block:
@@ -31,8 +31,8 @@
           register: win_script_out
           changed_when: false
 
-    # Extract and evaluate health data
-    - name: Parse output, set facts, and determine status atomically
+    # Extract and determine status
+    - name: Parse output, set facts, and determine status
       set_fact:
         cpu: "{{ cpu_val }}"
         ram: "{{ ram_val }}"
@@ -44,40 +44,38 @@
         ram_val: "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
         disk_val: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)', '\\1') | first | default(0) }}"
 
-    # Final report generation
-    - name: Generate and Display Final Report in AWX Job Output
-      run_once: true
-      delegate_to: localhost
+- name: Save summary report on control node
+  hosts: localhost
+  gather_facts: true
+  vars:
+    log_dir: /var/lib/awx/health_logs
+    log_filename: "health_check_{{ ansible_date_time.date }}_{{ ansible_date_time.time | replace(':','') }}.log"
+  tasks:
+    - name: Build final health summary
       set_fact:
-        summary_report: |
+        summary_output: |
           ####################################################################
           #              Node Health Check Summary Report                    #
           ####################################################################
-          {% for host in ansible_play_hosts_all %}
+          {% for host in hostvars %}
           HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
           {% endfor %}
           ####################################################################
-          Job Time: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          Run Time: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
           Executed By: {{ ansible_user_id }}
           ####################################################################
 
-    - name: Print summary report in console
-      run_once: true
-      debug:
-        msg: "{{ summary_report }}"
-
-    # Ensure /var/log/ansible_health_logs exists
-    - name: Create log directory on AWX control node
-      run_once: true
-      delegate_to: localhost
+    - name: Ensure log directory exists on control node
       file:
-        path: /var/log/ansible_health_logs
+        path: "{{ log_dir }}"
         state: directory
         mode: '0755'
 
-    - name: Write log file to AWX control node
-      run_once: true
-      delegate_to: localhost
+    - name: Write report to control node
       copy:
-        content: "{{ summary_report }}"
-        dest: "/var/log/ansible_health_logs/health_check_{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}.log"
+        content: "{{ summary_output }}"
+        dest: "{{ log_dir }}/{{ log_filename }}"
+
+    - name: Print summary in job output
+      debug:
+        msg: "{{ summary_output }}"
