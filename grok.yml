@@ -3,7 +3,6 @@
   hosts: all
   gather_facts: true
 
-  # Variables for the reporting task
   vars:
     report_host: '10.206.2.30'
     report_dir: 'C:\Temp\logs'
@@ -53,21 +52,26 @@
               register: win_disk
               changed_when: false
 
-        # --- Unify and Process Facts ---
-        # [FIXED] Renamed task for clarity and added the |float filter to convert string stdout to numbers.
-        - name: Unify and convert resource values to numbers
-          ansible.builtin.set_fact:
-            cpu:  "{{ ((ansible_facts['os_family'] == 'RedHat') | ternary(linux_cpu.stdout, win_cpu.stdout)) | float }}"
-            ram:  "{{ ((ansible_facts['os_family'] == 'RedHat') | ternary(linux_mem.stdout, win_mem.stdout)) | float }}"
-            disk: "{{ ((ansible_facts['os_family'] == 'RedHat') | ternary(linux_disk.stdout, win_disk.stdout)) | float }}"
-
-        # [FIXED] This task will now work correctly because the variables are floats, not strings.
-        - name: Determine health status from unified values
-          ansible.builtin.set_fact:
-            status: "{{ 'CRITICAL' if cpu > 60 or ram > 60 or disk > 60 else 'GOOD' }}"
+    # =========================================================
+    # BLOCK 2: Data Processing (REFACTORED)
+    # =========================================================
+    - name: Unify values and determine health status
+      ansible.builtin.set_fact:
+        # First, we set temporary variables for the raw string output.
+        _raw_cpu:  "{{ (ansible_facts['os_family'] == 'RedHat') | ternary(linux_cpu.stdout, win_cpu.stdout) }}"
+        _raw_ram:  "{{ (ansible_facts['os_family'] == 'RedHat') | ternary(linux_mem.stdout, win_mem.stdout) }}"
+        _raw_disk: "{{ (ansible_facts['os_family'] == 'RedHat') | ternary(linux_disk.stdout, win_disk.stdout) }}"
+      # Now, using the temporary variables, we create the final facts.
+      # This ensures the type conversion happens correctly and at the right time.
+    - name: Convert values and determine status
+      ansible.builtin.set_fact:
+        cpu: "{{ _raw_cpu | float }}"
+        ram: "{{ _raw_ram | float }}"
+        disk: "{{ _raw_disk | float }}"
+        status: "{{ 'CRITICAL' if (_raw_cpu | float > 60) or (_raw_ram | float > 60) or (_raw_disk | float > 60) else 'GOOD' }}"
 
     # =========================================================
-    # BLOCK 2: Final Reporting
+    # BLOCK 3: Final Reporting
     # =========================================================
     - name: Generate and save the consolidated report
       run_once: true
