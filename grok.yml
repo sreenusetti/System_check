@@ -44,11 +44,12 @@
           {{ linux_out.stdout  | default('') }}
           {{ win_out.stdout    | default('') }}
 
+    # [FIXED] Removed outer quotes to ensure variables are stored as numbers (floats), not strings.
     - name: Extract CPU/RAM/DISK as floats
       ansible.builtin.set_fact:
-        cpu:  "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}"
-        ram:  "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}"
-        disk: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}"
+        cpu:  {{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}
+        ram:  {{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}
+        disk: {{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}
 
     - name: Determine overall status
       ansible.builtin.set_fact:
