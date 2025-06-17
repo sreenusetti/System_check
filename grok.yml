@@ -1,133 +1,88 @@
 ---
-- name: Gather health metrics from all nodes
+- name: Health Check for Linux and Windows Nodes
   hosts: all
   gather_facts: true
 
-  vars:
-    logger_host:  "10.206.2.30"
-    log_dir:      'C:\Temp\logfile'
-    log_file:     "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
-
   tasks:
-    - name: Ensure C:\Scripts exists on Windows
-      win_file:
-        path: 'C:\Scripts'
-        state: directory
-      when: ansible_facts.os_family == 'Windows'
-
-    - name: Copy Linux script (check.sh)
-      copy:
-        src: scripts/check.sh
-        dest: /usr/local/bin/check.sh
-        mode: '0755'
-      when: ansible_facts.os_family == 'RedHat'
-
-    - name: Run health‐check script
+    # =========================
+    # Per-host data collection
+    # =========================
+    - name: Per-host resource collection and fact setting
       block:
-        - name: Run Linux check.sh
-          script: scripts/check.sh
-          when: ansible_facts.os_family == 'RedHat'
-          register: check_out
-          changed_when: false
-          failed_when: check_out.rc != 0
+        - name: Set OS family fact
+          set_fact:
+            os_family: "{{ ansible_facts['os_family'] }}"
 
-        - name: Run Windows check.ps1 under PowerShell
-          win_shell: |
-            powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\Scripts\check.ps1
-          when: ansible_facts.os_family == 'Windows'
-          register: check_out
-          changed_when: false
-          failed_when: check_out.rc != 0
+        # --- Linux Collection ---
+        - when: os_family == "RedHat"
+          block:
+            - name: Get CPU usage (Linux)
+              shell: top -bn1 | grep "Cpu(s)" | awk '{print 100 - $8}'
+              register: linux_cpu
+              changed_when: false
+            - name: Get Memory usage (Linux)
+              shell: free | awk '/Mem:/ {print ($3/$2) * 100}'
+              register: linux_mem
+              changed_when: false
+            - name: Get Disk usage (Linux)
+              shell: df / | awk 'NR==2 {print $5}' | sed 's/%//'
+              register: linux_disk
+              changed_when: false
 
-    - name: Combine stdout+stderr into raw_output
+        # --- Windows Collection ---
+        - when: os_family == "Windows"
+          block:
+            - name: Get CPU usage (Windows)
+              win_shell: '[math]::Round((Get-Counter "\Processor(_Total)\% Processor Time").CounterSamples.CookedValue, 2)'
+              register: win_cpu
+              changed_when: false
+            - name: Get Memory usage (Windows)
+              win_shell: |
+                $mem = Get-CimInstance Win32_OperatingSystem
+                [math]::Round((($mem.TotalVisibleMemorySize - $mem.FreePhysicalMemory) / $mem.TotalVisibleMemorySize) * 100, 2)
+              register: win_mem
+              changed_when: false
+            - name: Get Disk usage (Windows)
+              win_shell: |
+                $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+                [math]::Round((($disk.Size - $disk.FreeSpace) / $disk.Size) * 100, 2)
+              register: win_disk
+              changed_when: false
+
+        # Task 1 - Create the unified variables
+        - name: Unify resource values
+          set_fact:
+            cpu: "{{ (os_family == 'RedHat') | ternary(linux_cpu.stdout, win_cpu.stdout) }}"
+            ram: "{{ (os_family == 'RedHat') | ternary(linux_mem.stdout, win_mem.stdout) }}"
+            disk: "{{ (os_family == 'RedHat') | ternary(linux_disk.stdout, win_disk.stdout) }}"
+
+        # Task 2 - Use the variables, casting them to numbers at the moment of comparison
+        - name: Determine health status from unified values
+          set_fact:
+            status: "{{ 'CRITICAL' if cpu | float > 60 or ram | float > 60 or disk | float > 60 else 'GOOD' }}"
+
+    # =========================================================
+    # Generate and save summary report
+    # =========================================================
+    - name: Generate summary report content
+      run_once: true
+      delegate_to: localhost
       set_fact:
-        raw_output: "{{ (check_out.stdout|default('')) + (check_out.stderr|default('')) }}"
-
-    - name: Debug raw health‐check output
-      debug:
-        msg: |
-          ---- RAW OUTPUT from {{ inventory_hostname }} ----
-          {{ raw_output | default('<none>') }}
-          -----------------------------------------------
-
-    - name: Extract CPU, RAM, DISK strings
-      set_fact:
-        cpu_str:  "{{ raw_output  | regex_search('CPU=(\\d+\\.?\\d*)','\\1') | default('0') }}"
-        ram_str:  "{{ raw_output  | regex_search('RAM=(\\d+\\.?\\d*)','\\1') | default('0') }}"
-        disk_str: "{{ raw_output  | regex_search('DISK=(\\d+\\.?\\d*)','\\1') | default('0') }}"
-
-    - name: Debug extracted strings
-      debug:
-        msg:
-          - "cpu_str = {{ cpu_str }}"
-          - "ram_str = {{ ram_str }}"
-          - "disk_str = {{ disk_str }}"
-
-    - name: Convert to floats
-      set_fact:
-        cpu:  "{{ cpu_str | float }}"
-        ram:  "{{ ram_str | float }}"
-        disk: "{{ disk_str | float }}"
-
-    - name: Debug numeric metrics
-      debug:
-        msg:
-          - "cpu = {{ cpu }} (type={{ cpu.__class__.__name__ }})"
-          - "ram = {{ ram }} (type={{ ram.__class__.__name__ }})"
-          - "disk = {{ disk }} (type={{ disk.__class__.__name__ }})"
-
-    - name: Mark status as CRITICAL if thresholds exceeded
-      set_fact:
-        status: CRITICAL
-      when: cpu > 60 or ram > 60 or disk > 60
-
-    - name: Mark status as GOOD otherwise
-      set_fact:
-        status: GOOD
-      when: status is not defined
-
-    - name: Debug final status
-      debug:
-        msg: "Host={{ inventory_hostname }} STATUS={{ status }}"
-
-- name: Write consolidated report on logger node
-  hosts: "{{ logger_host }}"
-  gather_facts: false
-
-  vars:
-    log_dir: 'C:\Temp\logfile'
-    log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
-
-  tasks:
-    - name: Ensure log directory exists
-      win_file:
-        path: "{{ log_dir }}"
-        state: directory
-
-    - name: Write health summary to log file
-      win_copy:
-        dest: "{{ log_file }}"
-        content: |
+        report_content: |
           ####################################################################
-          #                Node Health Check Summary Report                 #
+          #                 Node Health Check Summary Report                 #
           ####################################################################
-          Hostname           | OS       |  CPU  |  RAM  | DISK  | STATUS
-          --------------------------------------------------------------------
-          {% for h in ansible_play_hosts_all %}
-          {{ '%-18s'|format(h) }} | {{ '%-8s'|format(hostvars[h].ansible_facts.os_family) }} | {{ '%5s'|format('%.2f%%'|format(hostvars[h].cpu)) }} | {{ '%5s'|format('%.2f%%'|format(hostvars[h].ram)) }} | {{ '%5s'|format('%.2f%%'|format(hostvars[h].disk)) }} | {{ hostvars[h].status }}
+          
+          {% for host in ansible_play_hosts_all %}
+          HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
           {% endfor %}
-          --------------------------------------------------------------------
-          Job ID:      {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
-          Time:        {{ ansible_date_time.iso8601 }}
-          Executed by: {{ ansible_user_id }}
-          Log File:    {{ log_file }}
+          
           ####################################################################
 
-    - name: Verify log file exists
-      win_stat:
-        path: "{{ log_file }}"
-      register: log_stat
-
-    - name: Debug log file existence
-      debug:
-        msg: "Log exists={{ log_stat.stat.exists }}, isreg={{ log_stat.stat.isreg }}"
+    - name: Save summary report to log file on specified Windows VM
+      delegate_to: 10.206.2.30
+      run_once: true
+      win_copy:
+        content: "{{ report_content }}"
+        dest: C:\temp\logs\health_check.log
+      when: inventory_hostname == '10.206.2.30' and ansible_facts['os_family'] == 'Windows'
