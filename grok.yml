@@ -7,16 +7,13 @@
     report_host: '10.206.2.30'
     report_dir: 'C:\Temp\logs'
     report_file: "{{ report_dir }}\\health_report_{{ awx_job_id | default('manual_run_' + ansible_date_time.iso8601_basic_short) }}.log"
-    # Define script paths for convenience
     linux_script_dest: /tmp/1.sh
     windows_script_dest: C:\Temp\1.ps1
 
   tasks:
     # =========================================================
-    # BLOCK 1: Per-host script execution (REFACTORED)
+    # BLOCK 1: Per-host script execution
     # =========================================================
-
-    # [FIXED] Run Linux script and register to a unique variable name
     - name: Run check script on RedHat hosts
       when: ansible_facts['os_family'] == "RedHat"
       block:
@@ -27,10 +24,9 @@
             mode: '0755'
         - name: Execute 1.sh and capture JSON output
           ansible.builtin.command: "{{ linux_script_dest }}"
-          register: linux_results # <-- Use a specific name
+          register: linux_results
           changed_when: false
 
-    # [FIXED] Run Windows script and register to a different unique variable name
     - name: Run check script on Windows hosts
       when: ansible_facts['os_family'] == "Windows"
       block:
@@ -41,7 +37,7 @@
         - name: Execute 1.ps1 and capture JSON output
           ansible.windows.win_powershell:
             script: "{{ windows_script_dest }}"
-          register: windows_results # <-- Use a specific name
+          register: windows_results
           changed_when: false
 
     # =========================================================
@@ -64,16 +60,18 @@
               #                 Node Health Check Summary Report                 #
               ####################################################################
               {% for host in ansible_play_hosts_all %}
-              {#--- [FIXED] This logic now checks for the OS-specific registered variable ---#}
               {% set data_found = false %}
 
+              {#--- [FIXED] Use the 'in' operator to safely check for 'stdout'. ---#}
+              {#--- This works even if the task was skipped. ---#}
+
               {#--- Check for Linux results first ---#}
-              {% if hostvars[host].linux_results is defined and hostvars[host].linux_results.stdout %}
+              {% if 'stdout' in hostvars[host].linux_results %}
                 {% set results = hostvars[host].linux_results.stdout | from_json %}
                 {% set data_found = true %}
 
               {#--- If not Linux, check for Windows results ---#}
-              {% elif hostvars[host].windows_results is defined and hostvars[host].windows_results.stdout %}
+              {% elif 'stdout' in hostvars[host].windows_results %}
                 {% set results = hostvars[host].windows_results.stdout | from_json %}
                 {% set data_found = true %}
               {% endif %}
@@ -103,7 +101,7 @@
     # BLOCK 3: Cleanup (Good Practice)
     # =========================================================
     - name: Clean up scripts from target nodes
-      ignore_errors: true # Ignore errors if file is already gone
+      ignore_errors: true
       block:
         - name: Remove script from RedHat hosts
           when: ansible_facts['os_family'] == "RedHat"
