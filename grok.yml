@@ -13,39 +13,36 @@
 
   tasks:
     # =========================================================
-    # BLOCK 1: Per-host script execution
+    # BLOCK 1: Per-host script execution (REFACTORED)
     # =========================================================
-    - name: Deploy and execute health check script for each host
-      block:
-        # --- Linux Actions ---
-        - name: Run check script on RedHat hosts
-          when: ansible_facts['os_family'] == "RedHat"
-          block:
-            - name: Copy 1.sh to remote host
-              ansible.builtin.copy:
-                # [FIXED] Corrected the path to look inside the 'scripts' directory
-                src: scripts/1.sh
-                dest: "{{ linux_script_dest }}"
-                mode: '0755'
-            - name: Execute 1.sh and capture JSON output
-              ansible.builtin.command: "{{ linux_script_dest }}"
-              register: health_results # Use one common register name
-              changed_when: false
 
-        # --- Windows Actions ---
-        - name: Run check script on Windows hosts
-          when: ansible_facts['os_family'] == "Windows"
-          block:
-            - name: Copy 1.ps1 to remote host
-              ansible.windows.win_copy:
-                # [FIXED] Corrected the path to look inside the 'scripts' directory
-                src: scripts/1.ps1
-                dest: "{{ windows_script_dest }}"
-            - name: Execute 1.ps1 and capture JSON output
-              ansible.windows.win_powershell:
-                script: "{{ windows_script_dest }}"
-              register: health_results # Use the same common register name
-              changed_when: false
+    # [FIXED] Run Linux script and register to a unique variable name
+    - name: Run check script on RedHat hosts
+      when: ansible_facts['os_family'] == "RedHat"
+      block:
+        - name: Copy 1.sh to remote host
+          ansible.builtin.copy:
+            src: scripts/1.sh
+            dest: "{{ linux_script_dest }}"
+            mode: '0755'
+        - name: Execute 1.sh and capture JSON output
+          ansible.builtin.command: "{{ linux_script_dest }}"
+          register: linux_results # <-- Use a specific name
+          changed_when: false
+
+    # [FIXED] Run Windows script and register to a different unique variable name
+    - name: Run check script on Windows hosts
+      when: ansible_facts['os_family'] == "Windows"
+      block:
+        - name: Copy 1.ps1 to remote host
+          ansible.windows.win_copy:
+            src: scripts/1.ps1
+            dest: "{{ windows_script_dest }}"
+        - name: Execute 1.ps1 and capture JSON output
+          ansible.windows.win_powershell:
+            script: "{{ windows_script_dest }}"
+          register: windows_results # <-- Use a specific name
+          changed_when: false
 
     # =========================================================
     # BLOCK 2: Final Reporting (Logic is now inside the template)
@@ -67,24 +64,33 @@
               #                 Node Health Check Summary Report                 #
               ####################################################################
               {% for host in ansible_play_hosts_all %}
-              {#--- This block replaces set_fact. It defines temporary variables for each host inside the loop ---#}
-              {% if hostvars[host].health_results is defined and hostvars[host].health_results.stdout is defined and hostvars[host].health_results.stdout != "" %}
-                {# Parse the JSON output from the script into a dictionary #}
-                {% set results = hostvars[host].health_results.stdout | from_json %}
-                {# Determine status based on the parsed dictionary values #}
+              {#--- [FIXED] This logic now checks for the OS-specific registered variable ---#}
+              {% set data_found = false %}
+
+              {#--- Check for Linux results first ---#}
+              {% if hostvars[host].linux_results is defined and hostvars[host].linux_results.stdout %}
+                {% set results = hostvars[host].linux_results.stdout | from_json %}
+                {% set data_found = true %}
+
+              {#--- If not Linux, check for Windows results ---#}
+              {% elif hostvars[host].windows_results is defined and hostvars[host].windows_results.stdout %}
+                {% set results = hostvars[host].windows_results.stdout | from_json %}
+                {% set data_found = true %}
+              {% endif %}
+
+              {#--- Now, based on whether data was found, format the output line ---#}
+              {% if data_found %}
                 {% set status = 'CRITICAL' if results.cpu > 60 or results.ram > 60 or results.disk > 60 else 'GOOD' %}
-                {# Format values for printing #}
                 {% set cpu_val = (results.cpu | string) + '%' %}
                 {% set ram_val = (results.ram | string) + '%' %}
                 {% set disk_val = (results.disk | string) + '%' %}
               {% else %}
-                {#--- Fallback for unreachable hosts or script failures ---#}
                 {% set status = 'FAILED_TO_GATHER' %}
                 {% set cpu_val = 'N/A' %}
                 {% set ram_val = 'N/A' %}
                 {% set disk_val = 'N/A' %}
               {% endif %}
-              {#--- This is the line that gets printed for each host, using the variables defined above ---#}
+              {#--- This is the line that gets printed for each host ---#}
               HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].ansible_facts.os_family | default('N/A')) }} | CPU: {{ '%-8s' | format(cpu_val) }} | RAM: {{ '%-8s' | format(ram_val) }} | Disk: {{ '%-8s' | format(disk_val) }} | STATUS: {{ status }}
               {% endfor %}
 
