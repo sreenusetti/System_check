@@ -1,5 +1,5 @@
 ---
-- name: Gather health metrics from all nodes
+- name: Gather and Log Health Metrics
   hosts: all
   gather_facts: true
 
@@ -8,93 +8,87 @@
     log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
 
   tasks:
-    - name: Debug start
-      ansible.builtin.debug:
-        msg: "Starting health check on {{ inventory_hostname }}"
+    - name: Set OS family
+      ansible.builtin.set_fact:
+        os_family: "{{ ansible_facts.os_family }}"
 
-    # --- Linux check.sh ---
-    - name: Copy check.sh to Linux and run
-      when: ansible_facts.os_family == 'RedHat'
+    # Linux: copy & run
+    - name: Copy and run check.sh on Linux
+      when: os_family == 'RedHat'
       block:
-        - ansible.builtin.copy:
+        - copy:
             src: scripts/check.sh
             dest: /usr/local/bin/check.sh
             mode: '0755'
-        - ansible.builtin.shell: /usr/local/bin/check.sh
+        - shell: /usr/local/bin/check.sh
           register: linux_out
           changed_when: false
           failed_when: linux_out.rc != 0
 
-    # --- Windows check.ps1 ---
-    - name: Copy check.ps1 to Windows and run
-      when: ansible_facts.os_family == 'Windows'
+    # Windows: copy & run
+    - name: Copy and run check.ps1 on Windows
+      when: os_family == 'Windows'
       block:
-        - ansible.windows.win_file:
+        - win_file:
             path: 'C:\Scripts'
             state: directory
-        - ansible.windows.win_copy:
+        - win_copy:
             src: scripts/check.ps1
             dest: 'C:\Scripts\check.ps1'
-        - ansible.windows.win_shell: 'C:\Scripts\check.ps1'
+        - win_shell: 'C:\Scripts\check.ps1'
           register: win_out
           changed_when: false
           failed_when: win_out.rc != 0
 
-    # --- Combine whatever output we got ---
-    - name: Aggregate script_output
-      ansible.builtin.set_fact:
+    # Merge outputs
+    - name: Aggregate raw output
+      set_fact:
         script_output: >-
-          {{ linux_out.stdout  | default('') }}
-          {{ win_out.stdout    | default('') }}
+          {{ linux_out.stdout | default('') }}
+          {{ win_out.stdout  | default('') }}
 
-    # --- Extract raw strings ---
-    - name: Extract raw CPU/RAM/DISK strings
-      ansible.builtin.set_fact:
-        cpu_str:  "{{ script_output | regex_search('CPU=(\\d+\\.?\\d*)','\\1') | default('0') }}"
-        ram_str:  "{{ script_output | regex_search('RAM=(\\d+\\.?\\d*)','\\1') | default('0') }}"
-        disk_str: "{{ script_output | regex_search('DISK=(\\d+\\.?\\d*)','\\1') | default('0') }}"
+    # Extract as floats
+    - name: Extract CPU/RAM/DISK as floats
+      set_fact:
+        cpu:  "{{ (script_output | regex_search('CPU=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}"
+        ram:  "{{ (script_output | regex_search('RAM=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}"
+        disk: "{{ (script_output | regex_search('DISK=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}"
 
-    # --- Convert to floats ---
-    - name: Convert metrics to floats
-      ansible.builtin.set_fact:
-        cpu:  "{{ cpu_str  | float }}"
-        ram:  "{{ ram_str  | float }}"
-        disk: "{{ disk_str | float }}"
-
-    - name: Debug parsed metrics
-      ansible.builtin.debug:
+    - name: Debug parsed values
+      debug:
         msg:
           - "Host={{ inventory_hostname }} CPU={{ cpu }}% RAM={{ ram }}% DISK={{ disk }}%"
 
-    # --- Compute status with real numbers ---
+    # Classic Jinja if/else to avoid inline-type pitfalls
     - name: Determine overall status
-      ansible.builtin.set_fact:
+      set_fact:
         status: >-
-          {% set c = cpu %}
-          {% set r = ram %}
-          {% set d = disk %}
-          {{ 'CRITICAL' if c > 60 or r > 60 or d > 60 else 'GOOD' }}
+          {% if cpu | float > 60 or ram | float > 60 or disk | float > 60 %}
+          CRITICAL
+          {% else %}
+          GOOD
+          {% endif %}
 
     - name: Debug status
-      ansible.builtin.debug:
+      debug:
         msg: "Host={{ inventory_hostname }} STATUS={{ status }}"
 
-- name: Save consolidated report on logger node
+- name: Write consolidated report on 10.206.2.30
   hosts: 10.206.2.30
   gather_facts: true
 
   vars:
-    log_dir:  'C:\Temp\logfile'
+    log_dir: 'C:\Temp\logfile'
     log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
 
   tasks:
     - name: Ensure log directory exists
-      ansible.windows.win_file:
+      win_file:
         path: "{{ log_dir }}"
         state: directory
 
-    - name: Write consolidated health summary
-      ansible.windows.win_copy:
+    - name: Write health summary to log file
+      win_copy:
         dest: "{{ log_file }}"
         content: |
           ####################################################################
@@ -106,7 +100,7 @@
           CPU:    {{ '%6.2f%%'|format(hostvars[host].cpu) }}
           RAM:    {{ '%6.2f%%'|format(hostvars[host].ram) }}
           DISK:   {{ '%6.2f%%'|format(hostvars[host].disk) }}
-          STATUS: {{ hostvars[host].status }}
+          STATE:  {{ hostvars[host].status }}
           --------------------------------------------------------------------
           {% endfor %}
           Job ID:      {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
@@ -114,13 +108,12 @@
           Executed by: {{ ansible_user_id }}
           Log File:    {{ log_file }}
           ####################################################################
-      register: write_report
 
     - name: Verify log file exists
-      ansible.windows.win_stat:
+      win_stat:
         path: "{{ log_file }}"
       register: log_stat
 
-    - name: Debug log file existence
-      ansible.builtin.debug:
+    - name: Debug log file check
+      debug:
         msg: "Log {{ log_file }} exists={{ log_stat.stat.exists }}, isreg={{ log_stat.stat.isreg }}"
