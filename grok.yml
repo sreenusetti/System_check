@@ -15,15 +15,16 @@
     # =========================================================
     # BLOCK 1: Per-host script execution
     # =========================================================
-    - name: Deploy and execute health 1 script for each host
+    - name: Deploy and execute health check script for each host
       block:
         # --- Linux Actions ---
-        - name: Run 1 script on RedHat hosts
+        - name: Run check script on RedHat hosts
           when: ansible_facts['os_family'] == "RedHat"
           block:
             - name: Copy 1.sh to remote host
               ansible.builtin.copy:
-                src: 1.sh # Assumes 1.sh is next to the playbook
+                # [FIXED] Corrected the path to look inside the 'scripts' directory
+                src: scripts/1.sh
                 dest: "{{ linux_script_dest }}"
                 mode: '0755'
             - name: Execute 1.sh and capture JSON output
@@ -32,12 +33,13 @@
               changed_when: false
 
         # --- Windows Actions ---
-        - name: Run 1 script on Windows hosts
+        - name: Run check script on Windows hosts
           when: ansible_facts['os_family'] == "Windows"
           block:
             - name: Copy 1.ps1 to remote host
               ansible.windows.win_copy:
-                src: 1.ps1 # Assumes 1.ps1 is next to the playbook
+                # [FIXED] Corrected the path to look inside the 'scripts' directory
+                src: scripts/1.ps1
                 dest: "{{ windows_script_dest }}"
             - name: Execute 1.ps1 and capture JSON output
               ansible.windows.win_powershell:
