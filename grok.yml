@@ -1,11 +1,12 @@
 ---
-- name: Gather health metrics and log
+- name: Collect health metrics from all nodes
   hosts: all
   gather_facts: true
 
   vars:
-    log_dir: 'C:\Temp\logfile'
-    log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
+    logger_host:  "10.206.2.30"
+    log_dir:      'C:\Temp\logfile'
+    log_file:     "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
 
   tasks:
     - name: Ensure C:\Scripts exists on Windows
@@ -14,41 +15,43 @@
         state: directory
       when: ansible_facts.os_family == 'Windows'
 
-    - name: Copy check.sh for Linux
-      ansible.builtin.copy:
-        src: scripts/check.sh
-        dest: /usr/local/bin/check.sh
-        mode: '0755'
+    - name: Run health check on Linux
+      ansible.builtin.script: scripts/check.sh
       when: ansible_facts.os_family == 'RedHat'
-
-    - name: Run health‐check script
-      block:
-        - ansible.builtin.script: scripts/check.sh
-          when: ansible_facts.os_family == 'RedHat'
-        - ansible.windows.win_shell: >
-            powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass
-            -File C:\Scripts\check.ps1
-          when: ansible_facts.os_family == 'Windows'
-      register: script_out
+      register: check_out
       changed_when: false
-      failed_when: script_out.rc != 0
+      failed_when: check_out.rc != 0
 
-    - name: Extract CPU, RAM, DISK as floats
-      ansible.builtin.set_fact:
-        cpu:  "{{ (script_out.stdout | regex_search('CPU=(\\d+\\.?\\d*)','\\1') | default('0', true)) | float }}"
-        ram:  "{{ (script_out.stdout | regex_search('RAM=(\\d+\\.?\\d*)','\\1') | default('0', true)) | float }}"
-        disk: "{{ (script_out.stdout | regex_search('DISK=(\\d+\\.?\\d*)','\\1') | default('0', true)) | float }}"
+    - name: Run health check on Windows
+      ansible.windows.win_script: scripts/check.ps1
+      when: ansible_facts.os_family == 'Windows'
+      register: check_out
+      changed_when: false
+      failed_when: check_out.rc != 0
 
-    - name: Determine overall status
+    - name: Parse CPU, RAM, DISK into floats
       ansible.builtin.set_fact:
-        status: "{{ 'CRITICAL' if cpu > 60 or ram > 60 or disk > 60 else 'GOOD' }}"
+        cpu:   "{{ (check_out.stdout  | regex_search('CPU=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}"
+        ram:   "{{ (check_out.stdout  | regex_search('RAM=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}"
+        disk:  "{{ (check_out.stdout  | regex_search('DISK=(\\d+\\.?\\d*)','\\1') | default('0')) | float }}"
+        status: >-
+          {{ 'CRITICAL'
+             if (cpu|float) > 60
+             or (ram|float) > 60
+             or (disk|float) > 60
+             else 'GOOD' }}
 
     - name: Debug host metrics
       ansible.builtin.debug:
-        msg: "Host={{ inventory_hostname }} CPU={{ cpu }}% RAM={{ ram }}% DISK={{ disk }}% STATUS={{ status }}"
+        msg: >
+          Host={{ inventory_hostname }}
+          CPU={{ '%.2f%%'|format(cpu) }}
+          RAM={{ '%.2f%%'|format(ram) }}
+          DISK={{ '%.2f%%'|format(disk) }}
+          STATUS={{ status }}
 
 - name: Write consolidated report on logger node
-  hosts: 10.206.2.30
+  hosts: "{{ logger_host }}"
   gather_facts: false
 
   vars:
@@ -68,14 +71,10 @@
           ####################################################################
           #                Node Health Check Summary Report                 #
           ####################################################################
-          Host | OS       | CPU    | RAM    | DISK   | STATUS
+          Host                 | OS         |   CPU |   RAM |  DISK | STATUS
+          --------------------------------------------------------------------
           {% for host in ansible_play_hosts_all %}
-          {{ hostvars[host].inventory_hostname }} |
-          {{ hostvars[host].ansible_facts.os_family | ljust(8) }} |
-          {{ '%.2f%%'|format(hostvars[host].cpu  | float) }} |
-          {{ '%.2f%%'|format(hostvars[host].ram  | float) }} |
-          {{ '%.2f%%'|format(hostvars[host].disk | float) }} |
-          {{ hostvars[host].status }}
+          {{ '%-20s'|format(host) }} | {{ '%-10s'|format(hostvars[host].ansible_facts.os_family) }} | {{ '%5s'|format('%.2f%%'|format(hostvars[host].cpu)) }} | {{ '%5s'|format('%.2f%%'|format(hostvars[host].ram)) }} | {{ '%5s'|format('%.2f%%'|format(hostvars[host].disk)) }} | {{ hostvars[host].status }}
           {% endfor %}
           --------------------------------------------------------------------
           Job ID:      {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
@@ -89,6 +88,6 @@
         path: "{{ log_file }}"
       register: log_stat
 
-    - name: Debug log file existence
+    - name: Debug log file status
       ansible.builtin.debug:
         msg: "Log exists={{ log_stat.stat.exists }}, isreg={{ log_stat.stat.isreg }}"
