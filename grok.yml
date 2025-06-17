@@ -1,116 +1,117 @@
-- name: Unified Health Check and Report Generation
+---
+- name: Health Check for Linux and Windows Nodes
   hosts: all
   gather_facts: true
 
+  tasks:
+    - name: Debug first play execution
+      ansible.builtin.debug:
+        msg: "Starting health check on {{ inventory_hostname }}"
+
+    - name: Set OS family fact
+      ansible.builtin.set_fact:
+        os_family: "{{ ansible_facts['os_family'] }}"
+
+    # --- Linux: run the shell script ---
+    - name: Run check.sh on Linux
+      ansible.builtin.script: scripts/check.sh
+      when: os_family == 'RedHat'
+      register: linux_script_out
+      changed_when: false
+      failed_when: linux_script_out.rc != 0
+
+    # --- Windows: prepare and run the PowerShell script ---
+    - name: Ensure C:\Scripts exists on Windows
+      ansible.windows.win_file:
+        path: C:\Scripts
+        state: directory
+      when: os_family == 'Windows'
+
+    - name: Copy check.ps1 to Windows
+      ansible.windows.win_copy:
+        src: scripts/check.ps1
+        dest: C:\Scripts\check.ps1
+      when: os_family == 'Windows'
+
+    - name: Run check.ps1 on Windows
+      ansible.windows.win_shell: C:\Scripts\check.ps1
+      when: os_family == 'Windows'
+      register: win_script_out
+      changed_when: false
+      failed_when: win_script_out.rc != 0
+
+    # --- Merge both outputs into one fact ---
+    - name: Aggregate script output
+      ansible.builtin.set_fact:
+        script_output: >-
+          {{ linux_script_out.stdout  | default('') }}
+          {{ win_script_out.stdout     | default('') }}
+
+    # --- Extract numeric metrics ---
+    - name: Extract CPU, RAM, and Disk percentages
+      ansible.builtin.set_fact:
+        cpu:  "{{ (script_output | regex_findall('CPU=(\d+\.?\d*)') | first | default(0)) | float }}"
+        ram:  "{{ (script_output | regex_findall('RAM=(\d+\.?\d*)') | first | default(0)) | float }}"
+        disk: "{{ (script_output | regex_findall('DISK=(\d+\.?\d*)') | first | default(0)) | float }}"
+
+    - name: Determine health status
+      ansible.builtin.set_fact:
+        status: "{{ 'CRITICAL' if cpu > 60 or ram > 60 or disk > 60 else 'GOOD' }}"
+
+    - name: Debug per-host metrics
+      ansible.builtin.debug:
+        msg: "Host {{ inventory_hostname }} → CPU={{ cpu }}%, RAM={{ ram }}%, DISK={{ disk }}%, STATUS={{ status }}"
+
+- name: Save Health Summary on Windows Node 10.206.2.30
+  hosts: 10.206.2.30
+  gather_facts: true
+
   vars:
-    reporting_host: "10.206.2.30"
-    log_dir: C:\Temp\health_reports
+    log_dir: C:\Temp\logfile
     log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
 
   tasks:
-    # ========================================================================
-    # BLOCK 1: Execute OS-Specific Health Check Scripts on each host
-    # ========================================================================
-    - name: Run OS-specific health check
-      block:
-        - name: Run health check on Linux
-          when: ansible_facts['os_family'] in ['RedHat', 'Debian']
-          ansible.builtin.shell: /tmp/check.sh
-          register: script_out
-          changed_when: false
-          args:
-            executable: /bin/bash
-            # Copy the script first if it's not already on the nodes
-            # (Assuming script is pre-deployed for this example)
+    - name: Ensure log directory exists
+      ansible.windows.win_file:
+        path: "{{ log_dir }}"
+        state: directory
 
-        - name: Run health check on Windows
-          when: ansible_facts['os_family'] == "Windows"
-          ansible.windows.win_shell: C:\Temp\ansible_scripts\check.ps1
-          register: script_out
-          changed_when: false
-          # (Assuming script is pre-deployed for this example)
-
-        # ✅ FINAL FIX: Use regex_findall for robust parsing
-        # This is the corrected task that will not fail.
-        - name: Extract CPU, RAM, DISK values
-          ansible.builtin.set_fact:
-            cpu: "{{ (script_out.stdout | regex_findall('CPU=([\\d.]+)') | first | default(0) | float) }}"
-            ram: "{{ (script_out.stdout | regex_findall('RAM=([\\d.]+)') | first | default(0) | float) }}"
-            disk: "{{ (script_out.stdout | regex_findall('DISK=([\\d.]+)') | first | default(0) | float) }}"
-            status: "CHECK_COMPLETE"
-          when: script_out is defined and script_out.stdout is defined
-
-      rescue:
-        - name: Set failure status if script execution or parsing failed
-          ansible.builtin.set_fact:
-            status: "CHECK_FAILED"
-            cpu: 0
-            ram: 0
-            disk: 0
-
-    # ========================================================================
-    # BLOCK 2: Determine final health status based on parsed metrics
-    # ========================================================================
-    - name: Determine final health status from metrics
+    - name: Build summary_output
       ansible.builtin.set_fact:
-        status: "{{ 'CRITICAL' if (cpu > 80 or ram > 80 or disk > 80) else 'GOOD' }}"
-      when: status == "CHECK_COMPLETE"
-
-    # ========================================================================
-    # BLOCK 3: Print a quick summary to the console output
-    # ========================================================================
-    - name: Print summary report to job output
-      run_once: true
-      delegate_to: localhost
-      ansible.builtin.debug:
-        msg: |
+        summary_output: |
           ####################################################################
-          #                 Node Health Check Summary Report                 #
+          #                Node Health Check Summary Report                 #
           ####################################################################
           {% for host in ansible_play_hosts_all %}
-          {% set h = hostvars[host] %}
-          HOST: {{ '%-20s' | format(h.inventory_hostname) }} | OS: {{ '%-10s' | format(h.ansible_facts.os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((h.cpu | default(0) | round(2) | string ~ '%')) }} | RAM: {{ '%-8s' | format((h.ram | default(0) | round(2) | string ~ '%')) }} | Disk: {{ '%-8s' | format((h.disk | default(0) | round(2) | string ~ '%')) }} | STATUS: {{ h.status | default('UNKNOWN') }}
+          Host:   {{ '%-20s'|format(hostvars[host].inventory_hostname) }}
+          OS:     {{ '%-10s'|format(hostvars[host].os_family) }}
+          CPU:    {{ '%6.2f%%'|format(hostvars[host].cpu) }}
+          RAM:    {{ '%6.2f%%'|format(hostvars[host].ram) }}
+          DISK:   {{ '%6.2f%%'|format(hostvars[host].disk) }}
+          STATE:  {{ hostvars[host].status }}
+          --------------------------------------------------------------------
           {% endfor %}
+          Job ID:      {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
+          Time:        {{ ansible_date_time.iso8601 }}
+          Executed by: {{ ansible_user_id }}
+          Log File:    {{ log_file }}
           ####################################################################
 
-    # ========================================================================
-    # BLOCK 4: Generate and save the detailed report on the target Windows node
-    # ========================================================================
-    - name: Generate and save detailed report file
-      when: inventory_hostname == reporting_host
-      block:
-        - name: Ensure log directory exists on reporting node
-          ansible.windows.win_file:
-            path: "{{ log_dir }}"
-            state: directory
+    - name: Write health summary to log file
+      ansible.windows.win_copy:
+        content: "{{ summary_output }}"
+        dest:    "{{ log_file }}"
 
-        - name: Build health summary content from all hosts
-          ansible.builtin.set_fact:
-            summary_content: |
-              ####################################################################
-              #                    Node Health Check Report                      #
-              ####################################################################
-              {% for host in ansible_play_hosts_all %}
-              {% set h = hostvars[host] %}
-              Hostname: {{ '%-20s' | format(h.inventory_hostname) }}
-              OS:       {{ h.ansible_facts.os_family | default('N/A') }}
-              CPU:      {{ (h.cpu | default(0) | round(2) | string + '%') }}
-              RAM:      {{ (h.ram | default(0) | round(2) | string + '%') }}
-              DISK:     {{ (h.disk | default(0) | round(2) | string + '%') }}
-              STATUS:   {{ h.status | default('CHECK_FAILED') }}
-              --------------------------------------------------------------------
-              {% endfor %}
-              Job ID:      {{ awx_job_id | default('manual_job_' + ansible_date_time.iso8601_basic_short) }}
-              Time:        {{ ansible_date_time.iso8601 }}
-              Executed by: {{ ansible_user_id | default('N/A') }}
-              Log File:    {{ log_file }}
-              ####################################################################
+    - name: Verify log file exists
+      ansible.windows.win_stat:
+        path: "{{ log_file }}"
+      register: log_stat
+      failed_when: not log_stat.stat.exists or not log_stat.stat.isreg
 
-        - name: Write health summary to log file on {{ reporting_host }}
-          ansible.windows.win_copy:
-            content: "{{ summary_content }}"
-            dest: "{{ log_file }}"
+    - name: Debug log file existence
+      ansible.builtin.debug:
+        msg: "Log file {{ log_file }} exists={{ log_stat.stat.exists }}, isreg={{ log_stat.stat.isreg }}"
 
-        - name: Display final report location
-          ansible.builtin.debug:
-            msg: "SUCCESS: Health check report saved to {{ log_file }} on host {{ inventory_hostname }}"
+    - name: Print saved summary in job output
+      ansible.builtin.debug:
+        msg: "{{ summary_output.split('\n') }}"
