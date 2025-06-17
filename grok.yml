@@ -3,6 +3,11 @@
   hosts: all
   gather_facts: true
 
+  vars:
+    # For Windows logging play
+    log_dir: 'C:\Temp\logfile'
+    log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
+
   tasks:
     - name: Debug first play execution
       ansible.builtin.debug:
@@ -12,49 +17,57 @@
       ansible.builtin.set_fact:
         os_family: "{{ ansible_facts['os_family'] }}"
 
-    # --- Linux: run the shell script ---
-    - name: Run check.sh on Linux
-      ansible.builtin.script: scripts/check.sh
+    # --- Linux check.sh section ---
+    - name: Copy and run check.sh on Linux
       when: os_family == 'RedHat'
-      register: linux_script_out
-      changed_when: false
-      failed_when: linux_script_out.rc != 0
+      block:
+        - name: Copy check.sh to Linux node
+          ansible.builtin.copy:
+            src: scripts/check.sh
+            dest: /usr/local/bin/check.sh
+            mode: '0755'
 
-    # --- Windows: prepare and run the PowerShell script ---
-    - name: Ensure C:\Scripts exists on Windows
-      ansible.windows.win_file:
-        path: C:\Scripts
-        state: directory
+        - name: Execute check.sh
+          ansible.builtin.shell: /usr/local/bin/check.sh
+          register: linux_script_out
+          changed_when: false
+          failed_when: linux_script_out.rc != 0
+
+    # --- Windows check.ps1 section ---
+    - name: Copy and run check.ps1 on Windows
       when: os_family == 'Windows'
+      block:
+        - name: Ensure C:\Scripts exists
+          ansible.windows.win_file:
+            path: 'C:\Scripts'
+            state: directory
 
-    - name: Copy check.ps1 to Windows
-      ansible.windows.win_copy:
-        src: scripts/check.ps1
-        dest: C:\Scripts\check.ps1
-      when: os_family == 'Windows'
+        - name: Copy check.ps1 to Windows node
+          ansible.windows.win_copy:
+            src: scripts/check.ps1
+            dest: 'C:\Scripts\check.ps1'
 
-    - name: Run check.ps1 on Windows
-      ansible.windows.win_shell: C:\Scripts\check.ps1
-      when: os_family == 'Windows'
-      register: win_script_out
-      changed_when: false
-      failed_when: win_script_out.rc != 0
+        - name: Execute check.ps1
+          ansible.windows.win_shell: 'C:\Scripts\check.ps1'
+          register: win_script_out
+          changed_when: false
+          failed_when: win_script_out.rc != 0
 
-    # --- Merge both outputs into one fact ---
-    - name: Aggregate script output
+    # --- Aggregate outputs ---
+    - name: Aggregate script_output
       ansible.builtin.set_fact:
         script_output: >-
-          {{ linux_script_out.stdout  | default('') }}
-          {{ win_script_out.stdout     | default('') }}
+          {{ linux_script_out.stdout | default('') }}
+          {{ win_script_out.stdout  | default('') }}
 
-    # --- Extract numeric metrics ---
-    - name: Extract CPU, RAM, and Disk percentages
+    # --- Extract and calculate metrics ---
+    - name: Extract CPU, RAM, and DISK percentages
       ansible.builtin.set_fact:
-        cpu:  "{{ (script_output | regex_findall('CPU=(\d+\.?\d*)') | first | default(0)) | float }}"
-        ram:  "{{ (script_output | regex_findall('RAM=(\d+\.?\d*)') | first | default(0)) | float }}"
-        disk: "{{ (script_output | regex_findall('DISK=(\d+\.?\d*)') | first | default(0)) | float }}"
+        cpu:  "{{ (script_output | regex_findall('CPU=(\\d+\\.?\\d*)') | first | default(0)) | float }}"
+        ram:  "{{ (script_output | regex_findall('RAM=(\\d+\\.?\\d*)') | first | default(0)) | float }}"
+        disk: "{{ (script_output | regex_findall('DISK=(\\d+\\.?\\d*)') | first | default(0)) | float }}"
 
-    - name: Determine health status
+    - name: Determine overall status
       ansible.builtin.set_fact:
         status: "{{ 'CRITICAL' if cpu > 60 or ram > 60 or disk > 60 else 'GOOD' }}"
 
@@ -62,21 +75,14 @@
       ansible.builtin.debug:
         msg: "Host {{ inventory_hostname }} → CPU={{ cpu }}%, RAM={{ ram }}%, DISK={{ disk }}%, STATUS={{ status }}"
 
-- name: Save Health Summary on Windows Node 10.206.2.30
-  hosts: 10.206.2.30
-  gather_facts: true
-
-  vars:
-    log_dir: C:\Temp\logfile
-    log_file: "{{ log_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
-
-  tasks:
-    - name: Ensure log directory exists
+    # --- Save consolidated report on one Windows node ---
+    - name: Ensure log directory exists on 10.206.2.30
       ansible.windows.win_file:
         path: "{{ log_dir }}"
         state: directory
+      when: inventory_hostname == '10.206.2.30'
 
-    - name: Build summary_output
+    - name: Build health summary content
       ansible.builtin.set_fact:
         summary_output: |
           ####################################################################
@@ -100,18 +106,17 @@
     - name: Write health summary to log file
       ansible.windows.win_copy:
         content: "{{ summary_output }}"
-        dest:    "{{ log_file }}"
+        dest: "{{ log_file }}"
+      when: inventory_hostname == '10.206.2.30'
 
     - name: Verify log file exists
       ansible.windows.win_stat:
         path: "{{ log_file }}"
       register: log_stat
       failed_when: not log_stat.stat.exists or not log_stat.stat.isreg
+      when: inventory_hostname == '10.206.2.30'
 
     - name: Debug log file existence
       ansible.builtin.debug:
         msg: "Log file {{ log_file }} exists={{ log_stat.stat.exists }}, isreg={{ log_stat.stat.isreg }}"
-
-    - name: Print saved summary in job output
-      ansible.builtin.debug:
-        msg: "{{ summary_output.split('\n') }}"
+      when: inventory_hostname == '10.206.2.30'
