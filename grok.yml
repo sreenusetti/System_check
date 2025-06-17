@@ -3,100 +3,119 @@
   hosts: all
   gather_facts: true
 
-  # Variables for the reporting task
   vars:
-    report_host: '10.206.2.30'
-    report_dir: 'C:\Temp\logs'
-    report_file: "{{ report_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
+    report_host:   '10.206.2.30'
+    report_dir:    'C:\Temp\logs'
+    report_file:   "{{ report_dir }}\\health_check_{{ ansible_date_time.iso8601_basic_short }}.log"
 
   tasks:
-    # =========================================================
-    # BLOCK 1: Per-host data collection
-    # This block runs on every host in the inventory.
-    # =========================================================
-    - name: Collect resource metrics for each host
-      block:
-        # --- Linux Collection ---
-        - name: Collect metrics from RedHat hosts
-          when: ansible_facts['os_family'] == "RedHat"
-          block:
-            - name: Get CPU usage (Linux)
-              ansible.builtin.shell: "top -bn1 | grep 'Cpu(s)' | awk '{print 100 - $8}'"
-              register: linux_cpu
-              changed_when: false
-            - name: Get Memory usage (Linux)
-              ansible.builtin.shell: "free | awk '/Mem:/ {print ($3/$2) * 100}'"
-              register: linux_mem
-              changed_when: false
-            - name: Get Disk usage (Linux)
-              ansible.builtin.shell: "df / | awk 'NR==2 {print $5}' | sed 's/%//'"
-              register: linux_disk
-              changed_when: false
+    - name: Set OS family fact
+      ansible.builtin.set_fact:
+        os_family: "{{ ansible_facts.os_family }}"
 
-        # --- Windows Collection ---
-        - name: Collect metrics from Windows hosts
-          when: ansible_facts['os_family'] == "Windows"
-          block:
-            - name: Get CPU usage (Windows)
-              ansible.windows.win_shell: '[math]::Round((Get-Counter "\Processor(_Total)\% Processor Time").CounterSamples.CookedValue, 2)'
-              register: win_cpu
-              changed_when: false
-            - name: Get Memory usage (Windows)
-              ansible.windows.win_shell: |
-                $mem = Get-CimInstance Win32_OperatingSystem
-                [math]::Round((($mem.TotalVisibleMemorySize - $mem.FreePhysicalMemory) / $mem.TotalVisibleMemorySize) * 100, 2)
-              register: win_mem
-              changed_when: false
-            - name: Get Disk usage (Windows)
-              ansible.windows.win_shell: |
-                $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-                [math]::Round((($disk.Size - $disk.FreeSpace) / $disk.Size) * 100, 2)
-              register: win_disk
-              changed_when: false
+    - name: Get CPU usage (Linux)
+      ansible.builtin.shell: |
+        top -bn1 | awk -F'id,' '/Cpu\\(s\\)/{ split($1, vs, ","); sub(/.* /,"", vs[1]); printf("%.2f", 100 - vs[1]) }'
+      register: linux_cpu
+      changed_when: false
+      when: os_family == 'RedHat'
 
-        # --- Unify and Process Facts ---
-        - name: Unify resource values from Linux or Windows
-          ansible.builtin.set_fact:
-            cpu:  "{{ (ansible_facts['os_family'] == 'RedHat') | ternary(linux_cpu.stdout, win_cpu.stdout) }}"
-            ram:  "{{ (ansible_facts['os_family'] == 'RedHat') | ternary(linux_mem.stdout, win_mem.stdout) }}"
-            disk: "{{ (ansible_facts['os_family'] == 'RedHat') | ternary(linux_disk.stdout, win_disk.stdout) }}"
+    - name: Get Memory usage (Linux)
+      ansible.builtin.shell: |
+        free | awk '/Mem:/ { printf("%.2f", $3/$2*100) }'
+      register: linux_mem
+      changed_when: false
+      when: os_family == 'RedHat'
 
-        - name: Determine health status from unified values
-          ansible.builtin.set_fact:
-            # Cast to float for comparison, then set status string
-            status: "{{ 'CRITICAL' if cpu | float > 60 or ram | float > 60 or disk | float > 60 else 'GOOD' }}"
+    - name: Get Disk usage (Linux)
+      ansible.builtin.shell: |
+        df / | awk 'NR==2 { gsub(/%/,"",$5); printf("%.2f", $5) }'
+      register: linux_disk
+      changed_when: false
+      when: os_family == 'RedHat'
 
-    # =========================================================
-    # BLOCK 2: Final Reporting
-    # This block runs ONLY ONCE and is delegated to the specific report_host.
-    # =========================================================
-    - name: Generate and save the consolidated report
-      run_once: true              # Ensures this block runs only one time for the entire play
-      delegate_to: "{{ report_host }}" # Executes these tasks on the specified Windows VM
-      block:
-        - name: Ensure log directory exists on the report host
-          ansible.windows.win_file:
-            path: "{{ report_dir }}"
-            state: directory
+    - name: Get CPU usage (Windows)
+      ansible.windows.win_shell: |
+        [math]::Round((Get-Counter "\Processor(_Total)\% Processor Time").CounterSamples.CookedValue, 2)
+      register: win_cpu
+      changed_when: false
+      when: os_family == 'Windows'
 
-        - name: Write summary report to the log file
-          ansible.windows.win_copy:
-            dest: "{{ report_file }}"
-            content: |
-              ####################################################################
-              #                 Node Health Check Summary Report                 #
-              ####################################################################
-              {% for host in ansible_play_hosts_all %}
-              HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].ansible_facts.os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
-              {% endfor %}
+    - name: Get Memory usage (Windows)
+      ansible.windows.win_shell: |
+        $m = Get-CimInstance Win32_OperatingSystem;
+        [math]::Round((($m.TotalVisibleMemorySize - $m.FreePhysicalMemory)/$m.TotalVisibleMemorySize)*100,2)
+      register: win_mem
+      changed_when: false
+      when: os_family == 'Windows'
 
-              ####################################################################
-              # Job executed at: {{ ansible_date_time.iso8601 }}
-              ####################################################################
+    - name: Get Disk usage (Windows)
+      ansible.windows.win_shell: |
+        $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'";
+        [math]::Round((($d.Size-$d.FreeSpace)/$d.Size)*100,2)
+      register: win_disk
+      changed_when: false
+      when: os_family == 'Windows'
 
-    # Optional: A final debug message on the control node to confirm completion
-    - name: Confirm report generation
-      run_once: true
-      delegate_to: localhost
+    - name: Unify resource values into floats
+      ansible.builtin.set_fact:
+        cpu:  "{{ (os_family == 'RedHat') | ternary(linux_cpu.stdout, win_cpu.stdout)  | float }}"
+        ram:  "{{ (os_family == 'RedHat') | ternary(linux_mem.stdout, win_mem.stdout)  | float }}"
+        disk: "{{ (os_family == 'RedHat') | ternary(linux_disk.stdout, win_disk.stdout) | float }}"
+
+    - name: Determine health status
+      ansible.builtin.set_fact:
+        status: "{{ 'CRITICAL' if (cpu > 60) or (ram > 60) or (disk > 60) else 'GOOD' }}"
+
+    - name: Debug per-host metrics
       ansible.builtin.debug:
-        msg: "Health check complete. Report generated at '{{ report_host }}:{{ report_file }}'."
+        msg: "Host={{ inventory_hostname }} OS={{ os_family }} CPU={{ cpu }}% RAM={{ ram }}% DISK={{ disk }}% STATUS={{ status }}"
+
+    - name: Build consolidated report lines
+      ansible.builtin.set_fact:
+        report_lines: >-
+          {% set lines = [] %}
+          {% do lines.append('####################################################################') %}
+          {% do lines.append('#                 Node Health Check Summary Report                #') %}
+          {% do lines.append('####################################################################') %}
+          {% for h in ansible_play_hosts_all %}
+          {% set fmt = '%-18s | %-8s | %6.2f%% | %6.2f%% | %6.2f%% | %s' %}
+          {% do lines.append(fmt|format(
+            hostvars[h].inventory_hostname,
+            hostvars[h].os_family,
+            hostvars[h].cpu,
+            hostvars[h].ram,
+            hostvars[h].disk,
+            hostvars[h].status
+          )) %}
+          {% endfor %}
+          {% do lines.append('####################################################################') %}
+          {{ lines }}
+      run_once: true
+
+    - name: Ensure report directory exists on report host
+      ansible.windows.win_file:
+        path: "{{ report_dir }}"
+        state: directory
+      run_once: true
+      delegate_to: "{{ report_host }}"
+
+    - name: Write report file on report host
+      ansible.windows.win_copy:
+        dest: "{{ report_file }}"
+        content: "{{ report_lines | join('\r\n') }}"
+      run_once: true
+      delegate_to: "{{ report_host }}"
+
+    - name: Verify report file exists on report host
+      ansible.windows.win_stat:
+        path: "{{ report_file }}"
+      register: report_stat
+      run_once: true
+      delegate_to: "{{ report_host }}"
+
+    - name: Debug report file existence
+      ansible.builtin.debug:
+        msg: "Report {{ report_file }} exists={{ report_stat.stat.exists }}, isreg={{ report_stat.stat.isreg }}"
+      run_once: true
+      delegate_to: "{{ report_host }}"
