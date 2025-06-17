@@ -23,7 +23,6 @@
             dest: "{{ linux_script_dest }}"
             mode: '0755'
         - name: Execute 1.sh and capture JSON output
-          # [FIXED] Switched to the 'shell' module to correctly execute the script with pipes.
           ansible.builtin.shell: "{{ linux_script_dest }}"
           register: linux_results
           changed_when: false
@@ -35,9 +34,9 @@
           ansible.windows.win_copy:
             src: scripts/1.ps1
             dest: "{{ windows_script_dest }}"
+        # [FIXED] Switched from 'win_powershell' to 'win_shell' to correctly execute the script file.
         - name: Execute 1.ps1 and capture JSON output
-          ansible.windows.win_powershell:
-            script: "{{ windows_script_dest }}"
+          ansible.windows.win_shell: "{{ windows_script_dest }}"
           register: windows_results
           changed_when: false
 
