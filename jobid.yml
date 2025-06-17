@@ -1,0 +1,102 @@
+---
+- name: Health Check for Linux and Windows Nodes
+  hosts: all
+  gather_facts: true
+
+  # Variables for the reporting task
+  vars:
+    report_host: '10.206.2.30'
+    report_dir: 'C:\Temp\logs'
+    # [CHANGED] The filename now uses the AWX Job ID with a fallback for manual runs.
+    report_file: "{{ report_dir }}\\health_report_{{ awx_job_id | default('manual_run_' + ansible_date_time.iso8601_basic_short) }}.log"
+
+  tasks:
+    # =========================================================
+    # BLOCK 1: Per-host data collection
+    # =========================================================
+    - name: Collect resource metrics for each host
+      block:
+        # --- Linux Collection ---
+        - name: Collect metrics from RedHat hosts
+          when: ansible_facts['os_family'] == "RedHat"
+          block:
+            - name: Get CPU usage (Linux)
+              ansible.builtin.shell: "top -bn1 | grep 'Cpu(s)' | awk '{print 100 - $8}'"
+              register: linux_cpu
+              changed_when: false
+            - name: Get Memory usage (Linux)
+              ansible.builtin.shell: "free | awk '/Mem:/ {print ($3/$2) * 100}'"
+              register: linux_mem
+              changed_when: false
+            - name: Get Disk usage (Linux)
+              ansible.builtin.shell: "df / | awk 'NR==2 {print $5}' | sed 's/%//'"
+              register: linux_disk
+              changed_when: false
+
+        # --- Windows Collection ---
+        - name: Collect metrics from Windows hosts
+          when: ansible_facts['os_family'] == "Windows"
+          block:
+            - name: Get CPU usage (Windows)
+              ansible.windows.win_shell: '[math]::Round((Get-Counter "\Processor(_Total)\% Processor Time").CounterSamples.CookedValue, 2)'
+              register: win_cpu
+              changed_when: false
+            - name: Get Memory usage (Windows)
+              ansible.windows.win_shell: |
+                $mem = Get-CimInstance Win32_OperatingSystem
+                [math]::Round((($mem.TotalVisibleMemorySize - $mem.FreePhysicalMemory) / $mem.TotalVisibleMemorySize) * 100, 2)
+              register: win_mem
+              changed_when: false
+            - name: Get Disk usage (Windows)
+              ansible.windows.win_shell: |
+                $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+                [math]::Round((($disk.Size - $disk.FreeSpace) / $disk.Size) * 100, 2)
+              register: win_disk
+              changed_when: false
+
+        # --- Unify and Process Facts ---
+        - name: Unify resource values from Linux or Windows
+          ansible.builtin.set_fact:
+            cpu:  "{{ (ansible_facts['os_family'] == 'RedHat') | ternary(linux_cpu.stdout, win_cpu.stdout) }}"
+            ram:  "{{ (ansible_facts['os_family'] == 'RedHat') | ternary(linux_mem.stdout, win_mem.stdout) }}"
+            disk: "{{ (ansible_facts['os_family'] == 'RedHat') | ternary(linux_disk.stdout, win_disk.stdout) }}"
+
+        - name: Determine health status from unified values
+          ansible.builtin.set_fact:
+            status: "{{ 'CRITICAL' if cpu | float > 60 or ram | float > 60 or disk | float > 60 else 'GOOD' }}"
+
+    # =========================================================
+    # BLOCK 2: Final Reporting
+    # =========================================================
+    - name: Generate and save the consolidated report
+      run_once: true
+      delegate_to: "{{ report_host }}"
+      block:
+        - name: Ensure log directory exists on the report host
+          ansible.windows.win_file:
+            path: "{{ report_dir }}"
+            state: directory
+
+        - name: Write summary report to the log file
+          ansible.windows.win_copy:
+            dest: "{{ report_file }}"
+            content: |
+              ####################################################################
+              #                 Node Health Check Summary Report                 #
+              ####################################################################
+              {% for host in ansible_play_hosts_all %}
+              HOST: {{ '%-20s' | format(hostvars[host].inventory_hostname) }} | OS: {{ '%-10s' | format(hostvars[host].ansible_facts.os_family | default('N/A')) }} | CPU: {{ '%-8s' | format((hostvars[host].cpu | float | round(2) | string ~ '%') if hostvars[host].cpu is defined else 'N/A') }} | RAM: {{ '%-8s' | format((hostvars[host].ram | float | round(2) | string ~ '%') if hostvars[host].ram is defined else 'N/A') }} | Disk: {{ '%-8s' | format((hostvars[host].disk | float | round(2) | string ~ '%') if hostvars[host].disk is defined else 'N/A') }} | STATUS: {{ hostvars[host].status | default('FAILED_TO_GATHER') }}
+              {% endfor %}
+
+              ####################################################################
+              # [CHANGED] Added the AWX Job ID to the report content.
+              # Job ID:        {{ awx_job_id | default('N/A - Manual Run') }}
+              # Executed at:   {{ ansible_date_time.iso8601 }}
+              ####################################################################
+
+    # Optional: A final debug message on the control node to confirm completion
+    - name: Confirm report generation
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg: "Health check complete. Report generated at '{{ report_host }}:{{ report_file }}'."
