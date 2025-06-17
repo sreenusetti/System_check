@@ -1,4 +1,3 @@
----
 - name: Gather health metrics from all nodes
   hosts: all
   gather_facts: true
